@@ -1,0 +1,43 @@
+{
+  "name": "osudh360",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:offline": "node --experimental-strip-types --no-warnings scripts/test-offline.ts",
+    "db:migrate": "node --env-file=.env.local --experimental-strip-types --no-warnings scripts/migrate.ts",
+    "db:reset": "node --env-file=.env.local --experimental-strip-types --no-warnings scripts/reset-db.ts --yes",
+    "data:sitemap": "node scripts/01-sitemap.mjs",
+    "data:generics": "node scripts/02-generic-pages.mjs",
+    "data:products": "node --no-warnings scripts/03-product-pages.mjs",
+    "data:import": "tsx scripts/04-import.ts",
+    "data:neon": "node --env-file=.env.local --experimental-strip-types --no-warnings scripts/import-neon.ts",
+    "data:refresh": "npm run data:products && npm run data:neon",
+    "data:all": "npm run data:sitemap && npm run data:generics && npm run data:products && npm run data:neon",
+    "neon:deploy": "neon deploy --env .env.local",
+    "db:readonly": "node --env-file=.env.local --experimental-strip-types --no-warnings scripts/db-readonly-role.ts",
+    "db:prune": "node --env-file=.env.local --experimental-strip-types --no-warnings scripts/prune-catalogue.ts",
+    "db:audit": "node --env-file=.env.local --experimental-strip-types --no-warnings scripts/audit-catalogue.ts"
+  },
+  "dependencies": {
+    "@neon/config": "^1.8.6",
+    "@neon/functions": "^0.11.0",
+    "better-sqlite3": "^13.0.3",
+    "jose": "^6.2.12",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^20",
+    "@types/pg": "^8.23.1",
+    "drizzle-kit": "^0.31.11",
+    "tsx": "^4.23.15",
+    "typescript": "^5",
+    "vitest": "^5.0.5",
+    "vite": "^8.3.4",
+    "eslint": "^9"
+  }
+}

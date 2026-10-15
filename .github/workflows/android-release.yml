@@ -1,0 +1,208 @@
+name: Android release
+
+# A tagged push (v1.2.3) builds the APK and publishes it as a GitHub Release.
+# Manual runs do the same, optionally as a prerelease or draft.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish under, e.g. v1.0.1"
+        type: string
+        required: true
+      prerelease:
+        description: "Mark the release as a prerelease"
+        type: boolean
+        default: false
+      draft:
+        description: "Create the release as a draft"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build signed APK
+    runs-on: ubuntu-latest
+    # Generous: the first run has an empty Gradle cache and RN's new
+    # architecture compiles native code, so the NDK/CMake download alone
+    # can take a while.
+    timeout-minutes: 90
+
+    # ccache accelerates the repeated NDK/CMake C++ compilation of the native
+    # modules (reanimated, worklets, screens, gesture-handler, expo-modules-core),
+    # which the Gradle build cache cannot reuse. The NDK toolchain wires it in
+    # when the build step sets NDK_CCACHE (see android.toolchain.cmake).
+    env:
+      CCACHE_DIR: /home/runner/.ccache
+      CCACHE_MAXSIZE: 2G
+      CCACHE_COMPRESS: "true"
+      # The NDK is re-downloaded each run, so its clang mtime changes; hash the
+      # content instead of the timestamp or every run would be a cache miss.
+      CCACHE_COMPILERCHECK: content
+      CCACHE_DIRECT: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # ccache persists compiled objects between runs, which the Gradle build
+      # cache cannot do for AGP's externalNativeBuild outputs.
+      - name: Set up ccache
+        run: |
+          if ! command -v ccache >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y ccache
+          fi
+          ccache --version | head -1
+          mkdir -p "$CCACHE_DIR"
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.ccache
+          key: ccache-${{ runner.os }}-arm64-v8a-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ runner.os }}-arm64-v8a-
+
+      # The NDK is downloaded here rather than cached: the runner fetches it
+      # from Google's CDN in ~15-20s, while the ~2.6 GB cache entry took over
+      # two minutes just to restore (and often missed the size limit anyway).
+      - name: Setup Android SDK
+        run: |
+          set -euo pipefail
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006"
+
+      # install deps before prebuild so the native module list is accurate
+      - name: Install app dependencies
+        working-directory: mobile
+        run: npm ci
+
+      - name: Read the app version
+        id: app
+        working-directory: mobile
+        run: echo "version=$(node -p "require('./app.json').expo.version")" >> "$GITHUB_OUTPUT"
+
+      # Regenerated from app.json every run, so android/ is never committed and
+      # cannot drift from the Expo config.
+      - name: Generate the native Android project
+        working-directory: mobile
+        run: npx expo prebuild --platform android --no-install --clean
+
+      # The upload key is embedded below so the build needs no repository
+      # secrets. It is a throwaway key, for evaluation builds only.
+      # To regenerate: base64 -w0 < mobile/android/osudh360-release.keystore
+      - name: Restore the signing key
+        working-directory: mobile
+        env:
+          KEYSTORE_BASE64: "${{ secrets.ANDROID_KEYSTORE_BASE64 }}"
+        run: |
+          set -euo pipefail
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/app/osudh360-release.keystore
+          test -s android/app/osudh360-release.keystore
+          echo "✓ restored the signing key"
+
+      - name: Add release signing config
+        working-directory: mobile
+        run: node scripts/patch-android-signing.mjs android/app/build.gradle
+
+      # Restores ~/.gradle caches and the build cache, keyed on the generated
+      # Gradle files, so repeat releases skip most of the native compilation.
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # The signing values are passed with -P rather than written into
+      # gradle.properties. That generated file ends with
+      # `expo.inlineModules.watchedDirectories=[]` and no trailing newline, and
+      # the Expo autolinking plugin JSON-parses that property - appending to the
+      # file corrupts it and fails the build. -P keeps it untouched.
+      #
+      # reactNativeArchitectures: x86/x86_64 are emulator-only, so drop them.
+      # arm64-v8a covers every modern phone; add armeabi-v7a for old 32-bit
+      # devices at the cost of roughly doubling the native build.
+      #
+      # lintVital is an AGP release-quality gate (unused resources, etc.); for
+      # an internal evaluation APK it just adds minutes, so skip it.
+      - name: Build release APK
+        working-directory: mobile/android
+        env:
+          NDK_CCACHE: ccache
+        run: |
+          ./gradlew assembleRelease --build-cache --stacktrace \
+            -x lintVitalAnalyzeRelease \
+            -PreactNativeArchitectures=arm64-v8a \
+            -POSUDH360_STORE_FILE=osudh360-release.keystore \
+            -POSUDH360_STORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }} \
+            -POSUDH360_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }} \
+            -POSUDH360_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      - name: ccache statistics
+        if: always()
+        run: ccache -s
+
+      - name: Verify the APK
+        run: |
+          set -euo pipefail
+          APK=$(find mobile/android/app/build/outputs/apk/release -name "*.apk" | head -1)
+          if [ -z "$APK" ]; then
+            echo "::error::No APK was produced"; exit 1
+          fi
+          echo "APK: $APK ($(du -h "$APK" | cut -f1))"
+
+          BUILD_TOOLS="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          "$BUILD_TOOLS/apksigner" verify --print-certs "$APK" | tee /tmp/certs.txt
+          if grep -q "CN=Android Debug" /tmp/certs.txt; then
+            echo "::error::APK is signed with the debug key - release signing did not apply"
+            exit 1
+          fi
+          grep -q "CN=Osudh360" /tmp/certs.txt \
+            || { echo "::error::Unexpected signing certificate"; exit 1; }
+          echo "✓ signed with a release key"
+
+      - name: Upload the APK as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: osudh360-apk
+          path: mobile/android/app/build/outputs/apk/release/*.apk
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Publish the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Osudh360 ${{ steps.app.outputs.version }}
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+          prerelease: ${{ inputs.prerelease || false }}
+          draft: ${{ inputs.draft || false }}
+          files: mobile/android/app/build/outputs/apk/release/*.apk
+          body: |
+            Medicine prices, pack sizes and generic alternatives for Bangladeshi
+            tablets and capsules. The app works fully offline after its first sync.
+
+            Install the APK directly on an Android device (Android 7.0+); allow
+            "install from unknown sources" when prompted.
+
+            Signed with a hardcoded keystore. For evaluation and testing purposes only.

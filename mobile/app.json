@@ -1,0 +1,53 @@
+{
+  "expo": {
+    "name": "Osudh360",
+    "slug": "osudh360",
+    "scheme": "osudh360",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "icon": "./assets/icon.png",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.osudh360.app"
+    },
+    "platforms": [
+      "android"
+    ],
+    "android": {
+      "permissions": [
+        "REQUEST_INSTALL_PACKAGES"
+      ],
+      "enableProguardInReleaseBuilds": true,
+      "package": "com.osudh360.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png",
+        "backgroundColor": "#0f766e"
+      }
+    },
+    "plugins": [
+      "expo-router",
+      "expo-sqlite",
+      [
+        "expo-font",
+        {
+          "fonts": [
+            "./assets/fonts/HindSiliguri-Regular.ttf",
+            "./assets/fonts/HindSiliguri-SemiBold.ttf"
+          ]
+        }
+      ],
+      "expo-web-browser",
+      "expo-secure-store",
+      "expo-sharing"
+    ],
+    "extra": {
+      "apiUrl": "https://br-bold-salad-b59octic-api.compute.c-7.us-east-2.aws.neon.tech"
+    }
+  }
+}
