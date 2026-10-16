@@ -3,7 +3,7 @@
     "name": "Osudh360",
     "slug": "osudh360",
     "scheme": "osudh360",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
     "icon": "./assets/icon.png",

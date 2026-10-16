@@ -20,36 +20,44 @@ import {
   type LocalMedicine,
 } from "../../lib/db";
 
-type DoseSlots = { morning: string; noon: string; night: string };
+type DoseSlots = { morning: string; noon: string; evening: string; night: string };
+
+type DoseKind = "solid" | "liquid" | "drops" | "application" | "custom";
 
 type PrescriptionItem = {
   medicine: LocalMedicine;
-  kind: "solid" | "liquid";
-  // solid tablet/capsule pattern, e.g. 1 | 0 | 1
+  kind: DoseKind;
   slots: DoseSlots;
-  // liquid (syrup etc.)
-  mlPerDose: string;
+  amount: string; // ml / drops / applications per dose
   timesPerDay: string;
   days: string;
   directions: string;
+  customSchedule: string;
+  customQty: string;
+};
+
+type PrescriptionPayloadItem = {
+  medicine: LocalMedicine;
+  kind: DoseKind;
+  slots?: DoseSlots;
+  amount?: number;
+  timesPerDay?: number;
+  days: number;
+  directions: string;
+  customSchedule?: string;
+  customQty?: number;
 };
 
 type PrescriptionPayload = {
   doctor: string;
   patient: string;
   showPrices: boolean;
-  items: {
-    medicine: LocalMedicine;
-    kind: "solid" | "liquid";
-    slots?: DoseSlots;
-    mlPerDose?: number;
-    timesPerDay?: number;
-    days: number;
-    directions: string;
-  }[];
+  items: PrescriptionPayloadItem[];
 };
 
 type CloudPrescription = { id: string; title: string; createdAt: string; payload: unknown };
+
+const SLOT_LABELS = ["Morning", "Noon", "Evening", "Night"];
 
 function unitPrice(m: LocalMedicine): number | null {
   if (m.price == null || !Number.isFinite(m.price)) return null;
@@ -62,24 +70,35 @@ function num(v: string | number | undefined | null): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function solidPerDay(slots: DoseSlots): number {
-  return num(slots.morning) + num(slots.noon) + num(slots.night);
+function slotTotal(slots: DoseSlots): number {
+  return num(slots.morning) + num(slots.noon) + num(slots.evening) + num(slots.night);
 }
 
 function perDayQty(it: PrescriptionItem): number {
-  if (it.kind === "liquid") return num(it.mlPerDose) * num(it.timesPerDay);
-  return solidPerDay(it.slots);
+  if (it.customSchedule.trim()) return 0;
+  if (it.kind === "liquid" || it.kind === "drops") return num(it.amount) * num(it.timesPerDay);
+  if (it.kind === "application") return num(it.timesPerDay);
+  return slotTotal(it.slots);
 }
 
 function totalQty(it: PrescriptionItem): number {
+  if (it.customSchedule.trim()) return num(it.customQty);
   return perDayQty(it) * (Number(it.days) || 0);
 }
 
 function subtotal(it: PrescriptionItem): number | null {
-  if (it.kind === "liquid") return null;
+  if (it.kind !== "solid") return null;
   const up = unitPrice(it.medicine);
   if (up == null) return null;
   return up * totalQty(it);
+}
+
+function guessKind(m: LocalMedicine): DoseKind {
+  const f = (m.form ?? "").toLowerCase();
+  if (f.includes("drop")) return "drops";
+  if (f.includes("cream") || f.includes("ointment") || f.includes("gel")) return "application";
+  if (isFluidForm(m.form)) return "liquid";
+  return "solid";
 }
 
 function escapeHtml(v: string): string {
@@ -87,44 +106,51 @@ function escapeHtml(v: string): string {
 }
 
 function scheduleText(it: PrescriptionItem): string {
+  if (it.customSchedule.trim()) return it.customSchedule.trim();
   if (it.kind === "liquid") {
-    const ml = num(it.mlPerDose) || 5;
+    const ml = num(it.amount) || 5;
     const times = num(it.timesPerDay) || 1;
     const chamoch = ml / 5;
     const chamochTxt = chamoch === 1 ? "১ চামচ" : `${chamoch} চামচ`;
     return `${chamochTxt} (${ml} ml) × ${times} বার/দিন`;
   }
-  const s = it.slots;
-  return `${s.morning}+${s.noon}+${s.night} (ম/দু/রাত)`;
+  if (it.kind === "drops") {
+    return `${num(it.amount) || 1} ফোঁটা × ${num(it.timesPerDay) || 1} বার/দিন`;
+  }
+  if (it.kind === "application") {
+    return `${num(it.timesPerDay) || 1} বার লাগান/দিন`;
+  }
+  return `${it.slots.morning}+${it.slots.noon}+${it.slots.evening}+${it.slots.night} (সকাল/দুপুর/বিকাল/রাত)`;
 }
 
 function buildPdfHtml(p: PrescriptionPayload): string {
   const rows = p.items
-    .map((it, i) => {
-      const tq = (it.kind === "liquid" ? num(it.mlPerDose) * num(it.timesPerDay) : num(it.slots!.morning) + num(it.slots!.noon) + num(it.slots!.night)) * it.days;
+    .map((raw, i) => {
+      const it = new PayloadItem(raw);
+      const tq = totalQty(it);
       const up = unitPrice(it.medicine);
-      const tot = it.kind === "liquid" || up == null ? null : up * tq;
+      const tot = it.kind === "solid" && up != null ? up * tq : null;
       const priceCells = p.showPrices
-        ? `<td>${up == null ? "—" : up.toFixed(2)}</td><td>${tot == null ? "—" : tot.toFixed(2)}</td>`
+        ? `<td>${up == null || it.kind !== "solid" ? "—" : up.toFixed(2)}</td><td>${tot == null ? "—" : tot.toFixed(2)}</td>`
         : "";
       return `<tr>
         <td>${i + 1}</td>
         <td>${escapeHtml(it.medicine.brand)}<br/><small>${escapeHtml(it.medicine.generic ?? "")} ${escapeHtml(it.medicine.strength)}</small></td>
         <td>${escapeHtml(it.medicine.form)}</td>
-        <td>${escapeHtml(scheduleText({ medicine: it.medicine, kind: it.kind, slots: it.slots ?? { morning: "1", noon: "0", night: "1" }, mlPerDose: String(it.mlPerDose ?? 5), timesPerDay: String(it.timesPerDay ?? 1), days: String(it.days), directions: it.directions }))}</td>
+        <td>${escapeHtml(scheduleText(it))}</td>
         <td>${escapeHtml(it.directions || "—")}</td>
-        <td>${tq}</td>
+        <td>${tq}${it.kind === "liquid" ? " ml" : it.kind === "drops" ? " drops" : it.kind === "application" ? " apply" : ""}</td>
         ${priceCells}
       </tr>`;
     })
     .join("");
 
   const grand = p.showPrices
-    ? p.items.reduce((s, it) => {
+    ? p.items.reduce((s, raw) => {
+        const it = new PayloadItem(raw);
         const up = unitPrice(it.medicine);
-        if (up == null || it.kind === "liquid") return s;
-        const tq = (num(it.slots!.morning) + num(it.slots!.noon) + num(it.slots!.night)) * it.days;
-        return s + up * tq;
+        if (up == null || it.kind !== "solid") return s;
+        return s + up * totalQty(it);
       }, 0)
     : null;
 
@@ -163,7 +189,7 @@ function buildPdfHtml(p: PrescriptionPayload): string {
     </tr></thead>
     <tbody>${rows}</tbody>
   </table>
-  ${p.showPrices && grand != null ? `<p class="tot">Estimated total: ${grand.toFixed(2)} BDT</p>` : ""}
+  ${p.showPrices && grand != null ? `<p class="tot">Estimated total (tablets only): ${grand.toFixed(2)} BDT</p>` : ""}
   <p class="foot">Information only — not medical advice. Verify brand, strength and expiry on the pack before use.</p>
 </body>
 </html>`;
@@ -188,6 +214,7 @@ export default function PrescriptionsScreen() {
   const [forms, setForms] = useState<{ form: string }[]>([]);
   const [filterForm, setFilterForm] = useState("all");
   const [filterStrength, setFilterStrength] = useState("");
+  const [filterPack, setFilterPack] = useState("");
 
   const loadSaved = async () => {
     setLoading(true);
@@ -225,28 +252,34 @@ export default function PrescriptionsScreen() {
       "Gel",
       "Powder",
       "Solution",
+      "Sachet",
       "Spray",
+      "Lotion",
     ].map((form) => ({ form })));
   }, []);
 
   useEffect(() => {
-    if (search.trim().length < 2 && filterStrength.trim().length < 2 && filterForm === "all") {
+    if (search.trim().length < 2 && filterStrength.trim().length < 2 && filterForm === "all" && filterPack.trim().length < 2) {
       setResults([]);
       return;
     }
     setSearching(true);
-    searchMedicines({ q: search.trim() || undefined, form: filterForm === "all" ? undefined : filterForm, limit: 12 })
+    searchMedicines({ q: search.trim() || undefined, form: filterForm === "all" ? undefined : filterForm, limit: 14 })
       .then((r) => {
         let items = r.items;
         if (filterStrength.trim()) {
           const needle = filterStrength.toLowerCase();
           items = items.filter((m) => (m.strength ?? "").toLowerCase().includes(needle));
         }
+        if (filterPack.trim()) {
+          const needle = filterPack.toLowerCase();
+          items = items.filter((m) => `${m.packType ?? ""} ${m.packSize ?? ""}`.toLowerCase().includes(needle));
+        }
         setResults(items);
       })
       .catch(() => setResults([]))
       .finally(() => setSearching(false));
-  }, [search, filterForm, filterStrength]);
+  }, [search, filterForm, filterStrength, filterPack]);
 
   const resetDraft = () => {
     setDoctor("");
@@ -257,21 +290,24 @@ export default function PrescriptionsScreen() {
     setResults([]);
     setFilterForm("all");
     setFilterStrength("");
+    setFilterPack("");
   };
 
   const addItem = (m: LocalMedicine) => {
     if (items.some((it) => it.medicine.id === m.id)) return;
-    const fluid = isFluidForm(m.form);
+    const kind = guessKind(m);
     setItems((prev) => [
       ...prev,
       {
         medicine: m,
-        kind: fluid ? "liquid" : "solid",
-        slots: { morning: "1", noon: "0", night: "1" },
-        mlPerDose: "5",
-        timesPerDay: "2",
+        kind,
+        slots: { morning: kind === "solid" ? "1" : "0", noon: "0", evening: "0", night: kind === "solid" ? "1" : "0" },
+        amount: kind === "liquid" ? "5" : kind === "drops" ? "1" : "1",
+        timesPerDay: kind === "solid" ? "2" : "3",
         days: "5",
         directions: "",
+        customSchedule: "",
+        customQty: "",
       },
     ]);
     setSearch("");
@@ -296,15 +332,19 @@ export default function PrescriptionsScreen() {
     doctor: doctor.trim(),
     patient: patient.trim(),
     showPrices,
-    items: its.map((it) => ({
-      medicine: it.medicine,
-      kind: it.kind,
-      slots: it.kind === "solid" ? it.slots : undefined,
-      mlPerDose: it.kind === "liquid" ? num(it.mlPerDose) : undefined,
-      timesPerDay: it.kind === "liquid" ? num(it.timesPerDay) : undefined,
-      days: Number(it.days) || 0,
-      directions: it.directions.trim(),
-    })),
+    items: its.map((it) => {
+      return {
+        medicine: it.medicine,
+        kind: it.kind,
+        slots: it.kind === "solid" ? it.slots : undefined,
+        amount: it.kind === "liquid" || it.kind === "drops" || it.kind === "application" ? num(it.amount || it.timesPerDay) : undefined,
+        timesPerDay: it.kind === "application" ? num(it.timesPerDay) : num(it.timesPerDay),
+        days: Number(it.days) || 0,
+        directions: it.directions.trim(),
+        customSchedule: it.customSchedule.trim() || undefined,
+        customQty: it.customSchedule.trim() ? num(it.customQty) : undefined,
+      };
+    }),
   });
 
   const saveCurrent = async () => {
@@ -404,21 +444,21 @@ export default function PrescriptionsScreen() {
         <ScrollView contentContainerStyle={styles.content}>
           {openPayload.doctor ? <Text style={[styles.muted, { color: theme.text }]}>Doctor: {openPayload.doctor}</Text> : null}
           {openPayload.patient ? <Text style={[styles.muted, { color: theme.text }]}>Patient: {openPayload.patient}</Text> : null}
-          {openPayload.items.map((it, i) => {
-            const pr = new PrescriptionItemView(it);
+          {openPayload.items.map((raw, i) => {
+            const it = new PayloadItem(raw);
             return (
-              <View key={it.medicine.id + i} style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
-                <Text style={[styles.cardTitle, { color: theme.text }]}>{it.medicine.brand}</Text>
+              <View key={raw.medicine.id + i} style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
+                <Text style={[styles.cardTitle, { color: theme.text }]}>{raw.medicine.brand}</Text>
                 <Text style={[styles.muted, { color: theme.muted }]}>
-                  {it.medicine.generic ?? ""} · {it.medicine.strength} · {it.medicine.form}
+                  {raw.medicine.generic ?? ""} · {raw.medicine.strength} · {raw.medicine.form}
                 </Text>
                 <Text style={[styles.muted, { color: theme.text }]}>
-                  {scheduleText(pr)} · {pr.days} days · {totalQty(pr)} total
+                  {scheduleText(it)} · {it.days} days · {totalQty(it)} total
                 </Text>
                 {it.directions ? <Text style={[styles.muted, { color: theme.muted }]}>Directions: {it.directions}</Text> : null}
-                {openPayload.showPrices ? (
+                {openPayload.showPrices && it.kind === "solid" ? (
                   <Text style={[styles.muted, { color: theme.accent }]}>
-                    Subtotal: {subtotal(pr) == null ? "—" : subtotal(pr)!.toFixed(2)} BDT
+                    Subtotal: {subtotal(it) == null ? "—" : subtotal(it)!.toFixed(2)} BDT
                   </Text>
                 ) : null}
               </View>
@@ -507,6 +547,13 @@ export default function PrescriptionsScreen() {
           placeholderTextColor={theme.faint}
           style={[styles.input, { color: theme.text, borderColor: theme.border, backgroundColor: theme.card }]}
         />
+        <TextInput
+          value={filterPack}
+          onChangeText={setFilterPack}
+          placeholder="Filter by pack (e.g. Strip, 10)"
+          placeholderTextColor={theme.faint}
+          style={[styles.input, { color: theme.text, borderColor: theme.border, backgroundColor: theme.card }]}
+        />
 
         <Text style={[styles.section, { color: theme.text }]}>Add medicine</Text>
         <TextInput
@@ -535,35 +582,42 @@ export default function PrescriptionsScreen() {
             </View>
             <Text style={[styles.muted, { color: theme.muted }]}>{it.medicine.generic ?? ""} · {it.medicine.strength} · {it.medicine.form}</Text>
 
-            {it.kind === "solid" ? (
+            {/* Custom schedule overrides everything */}
+            <Text style={[styles.label, { color: theme.muted }]}>Custom schedule (optional)</Text>
+            <TextInput
+              value={it.customSchedule}
+              onChangeText={(v) => updateItem(it.medicine.id, { customSchedule: v })}
+              placeholder="e.g. 1/2 tablet morning & night, SOS"
+              placeholderTextColor={theme.faint}
+              style={[styles.input, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
+            />
+            {it.customSchedule.trim() ? (
+              <TextInput
+                value={it.customQty}
+                onChangeText={(v) => updateItem(it.medicine.id, { customQty: v })}
+                placeholder="Total quantity"
+                keyboardType="numeric"
+                placeholderTextColor={theme.faint}
+                style={[styles.input, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
+              />
+            ) : null}
+
+            {!it.customSchedule.trim() && (it.kind === "solid") ? (
               <View style={styles.row}>
-                <View style={styles.fieldCol}>
-                  <Text style={[styles.label, { color: theme.muted }]}>Morning</Text>
-                  <TextInput
-                    value={it.slots.morning}
-                    onChangeText={(v) => updateSlots(it.medicine.id, { morning: v })}
-                    keyboardType="decimal-pad"
-                    style={[styles.smallInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
-                  />
-                </View>
-                <View style={styles.fieldCol}>
-                  <Text style={[styles.label, { color: theme.muted }]}>Noon</Text>
-                  <TextInput
-                    value={it.slots.noon}
-                    onChangeText={(v) => updateSlots(it.medicine.id, { noon: v })}
-                    keyboardType="decimal-pad"
-                    style={[styles.smallInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
-                  />
-                </View>
-                <View style={styles.fieldCol}>
-                  <Text style={[styles.label, { color: theme.muted }]}>Night</Text>
-                  <TextInput
-                    value={it.slots.night}
-                    onChangeText={(v) => updateSlots(it.medicine.id, { night: v })}
-                    keyboardType="decimal-pad"
-                    style={[styles.smallInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
-                  />
-                </View>
+                {SLOT_LABELS.map((lab, idx) => {
+                  const key = (["morning", "noon", "evening", "night"] as (keyof DoseSlots)[])[idx];
+                  return (
+                    <View key={key} style={styles.fieldCol}>
+                      <Text style={[styles.label, { color: theme.muted }]}>{lab}</Text>
+                      <TextInput
+                        value={it.slots[key]}
+                        onChangeText={(v) => updateSlots(it.medicine.id, { [key]: v })}
+                        keyboardType="decimal-pad"
+                        style={[styles.smallInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
+                      />
+                    </View>
+                  );
+                })}
                 <View style={styles.fieldCol}>
                   <Text style={[styles.label, { color: theme.muted }]}>Days</Text>
                   <TextInput
@@ -574,26 +628,32 @@ export default function PrescriptionsScreen() {
                   />
                 </View>
               </View>
-            ) : (
+            ) : null}
+
+            {!it.customSchedule.trim() && it.kind !== "solid" ? (
               <View style={styles.row}>
                 <View style={styles.fieldCol}>
-                  <Text style={[styles.label, { color: theme.muted }]}>ml/dose</Text>
+                  <Text style={[styles.label, { color: theme.muted }]}>
+                    {it.kind === "liquid" ? "ml/dose" : it.kind === "drops" ? "Drops/dose" : it.kind === "application" ? "Times/day" : "Qty"}
+                  </Text>
                   <TextInput
-                    value={it.mlPerDose}
-                    onChangeText={(v) => updateItem(it.medicine.id, { mlPerDose: v })}
+                    value={it.amount}
+                    onChangeText={(v) => updateItem(it.medicine.id, { amount: v })}
                     keyboardType="decimal-pad"
                     style={[styles.smallInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
                   />
                 </View>
-                <View style={styles.fieldCol}>
-                  <Text style={[styles.label, { color: theme.muted }]}>Times/day</Text>
-                  <TextInput
-                    value={it.timesPerDay}
-                    onChangeText={(v) => updateItem(it.medicine.id, { timesPerDay: v })}
-                    keyboardType="numeric"
-                    style={[styles.smallInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
-                  />
-                </View>
+                {(it.kind === "liquid" || it.kind === "drops") ? (
+                  <View style={styles.fieldCol}>
+                    <Text style={[styles.label, { color: theme.muted }]}>Times/day</Text>
+                    <TextInput
+                      value={it.timesPerDay}
+                      onChangeText={(v) => updateItem(it.medicine.id, { timesPerDay: v })}
+                      keyboardType="numeric"
+                      style={[styles.smallInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
+                    />
+                  </View>
+                ) : null}
                 <View style={styles.fieldCol}>
                   <Text style={[styles.label, { color: theme.muted }]}>Days</Text>
                   <TextInput
@@ -604,11 +664,11 @@ export default function PrescriptionsScreen() {
                   />
                 </View>
                 <View style={styles.fieldCol}>
-                  <Text style={[styles.label, { color: theme.muted }]}>Total ml</Text>
+                  <Text style={[styles.label, { color: theme.muted }]}>Total</Text>
                   <Text style={[styles.totalText, { color: theme.accent }]}>{totalQty(it)}</Text>
                 </View>
               </View>
-            )}
+            ) : null}
 
             <Text style={[styles.muted, { color: theme.muted }]}>
               Schedule: {scheduleText(it)} · {totalQty(it)} total · {it.days} days
@@ -616,7 +676,7 @@ export default function PrescriptionsScreen() {
             <TextInput
               value={it.directions}
               onChangeText={(v) => updateItem(it.medicine.id, { directions: v })}
-              placeholder="Directions (e.g. After food, খাওয়ার পরে, SOS)"
+              placeholder="Directions (e.g. After food, খাওয়ার পরে, SOS, external use only)"
               placeholderTextColor={theme.faint}
               style={[styles.input, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
             />
@@ -648,23 +708,26 @@ export default function PrescriptionsScreen() {
   );
 }
 
-// Adapter so stored payload can be viewed again with the same helpers.
-class PrescriptionItemView {
+class PayloadItem implements PrescriptionItem {
   medicine: LocalMedicine;
-  kind: "solid" | "liquid";
+  kind: DoseKind;
   slots: DoseSlots;
-  mlPerDose: string;
+  amount: string;
   timesPerDay: string;
   days: string;
   directions: string;
-  constructor(p: PrescriptionPayload["items"][number]) {
+  customSchedule: string;
+  customQty: string;
+  constructor(p: PrescriptionPayloadItem) {
     this.medicine = p.medicine;
     this.kind = p.kind;
-    this.slots = p.slots ?? { morning: "1", noon: "0", night: "1" };
-    this.mlPerDose = String(p.mlPerDose ?? 5);
-    this.timesPerDay = String(p.timesPerDay ?? 1);
+    this.slots = p.slots ?? { morning: "1", noon: "0", evening: "0", night: "1" };
+    this.amount = String(p.amount ?? (p.kind === "drops" ? 1 : p.kind === "liquid" ? 5 : 1));
+    this.timesPerDay = String(p.timesPerDay ?? (p.kind === "solid" ? 2 : 3));
     this.days = String(p.days ?? 0);
     this.directions = p.directions ?? "";
+    this.customSchedule = p.customSchedule ?? "";
+    this.customQty = String(p.customQty ?? 0);
   }
 }
 
@@ -678,7 +741,7 @@ const styles = StyleSheet.create({
   label: { fontSize: 12, fontFamily: font.regular, marginBottom: 4, marginTop: space.sm },
   section: { fontSize: 16, fontFamily: font.semibold, marginTop: space.md },
   input: { borderWidth: 1, borderRadius: radius.md, paddingHorizontal: space.md, paddingVertical: space.sm, fontSize: 14, fontFamily: font.regular },
-  smallInput: { borderWidth: 1, borderRadius: radius.md, paddingHorizontal: space.sm, paddingVertical: 6, fontSize: 13, fontFamily: font.regular, width: 62 },
+  smallInput: { borderWidth: 1, borderRadius: radius.md, paddingHorizontal: space.sm, paddingVertical: 6, fontSize: 13, fontFamily: font.regular, width: 58 },
   primaryBtn: { paddingVertical: space.md, borderRadius: radius.pill, alignItems: "center", justifyContent: "center" },
   primaryBtnText: { color: "#fff", fontSize: 14, fontFamily: font.semibold },
   secondaryBtn: { paddingVertical: space.md, borderRadius: radius.pill, borderWidth: 1, alignItems: "center", justifyContent: "center" },
