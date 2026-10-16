@@ -97,8 +97,9 @@ neon deploy --env .env.local   # deploys api.ts
 - `neon.ts` — infrastructure as code (function + auth).
 - `drizzle/0000_init.sql` — schema.
 
-Routes: `/`, `/sync`, `/medicines`, `/medicines/:slug`, `/generics`,
-`/generics/:slug`, `/categories`, `/companies`.
+Routes: `/`, `/sync`, `/medicines`, `/medicines/:slug`, `/medicines/:slug/history`,
+`/generics`, `/generics/:slug`, `/categories`, `/companies`, `/prescriptions`,
+`/prescriptions/:id`.
 
 `/sync` has two modes with **different cursors**: a full sync pages by a stable
 id (`?after=`), an incremental sync asks for rows changed after a timestamp
@@ -119,6 +120,12 @@ SQLite on first sync. After that the network is only needed to *refresh*:
   definition exactly.
 - Later syncs request only rows changed since the last watermark, which is a few
   kilobytes.
+- **Company filtering** is computed on-device too; the home screen offers a short
+  list of companies, so every filter works with the radio off.
+- **Saved medicines and prescriptions** are stored locally and work offline;
+  prescriptions saved while connected are also mirrored locally for offline use.
+- **Images** are the exception: they are shown from the pharmacy's CDN, and only
+  once already cached by the OS. The catalogue itself is fully offline.
 
 `scripts/test-offline.ts` replays the app's real schema and queries against a
 temporary SQLite file, asserts the offline alternatives set is identical to the

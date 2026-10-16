@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Image, Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Stack, useLocalSearchParams } from "expo-router";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
 import {
   Chip,
   EmptyState,
@@ -17,11 +18,14 @@ import {
   getBrandStrengths,
   getMedicineBySlug,
   getOtherStrengths,
+  isFavorite,
   isFluidForm,
+  toggleFavorite,
   type LocalMedicine,
 } from "../../lib/db";
 import { useApp } from "../../store";
 import { useT } from "../../lib/i18n";
+import { api } from "../../lib/api";
 import { font, radius, space } from "../../theme";
 
 /**
@@ -45,6 +49,10 @@ export default function MedicineScreen() {
   const [alternatives, setAlternatives] = useState<LocalMedicine[]>([]);
   const [otherStrengths, setOtherStrengths] = useState<LocalMedicine[]>([]);
   const [brandStrengths, setBrandStrengths] = useState<LocalMedicine[]>([]);
+  const [priceHistory, setPriceHistory] = useState<
+    { id: number; price: number | null; capturedAt: string }[]
+  >([]);
+  const [favorite, setFavorite] = useState(false);
   const [loading, setLoading] = useState(true);
 
   // A fresh deep link resets the in-place selection.
@@ -56,17 +64,20 @@ export default function MedicineScreen() {
     if (!activeSlug) return;
     let cancelled = false;
     void (async () => {
-      const [m, alt, other, strengths] = await Promise.all([
+      const [m, alt, other, strengths, history] = await Promise.all([
         getMedicineBySlug(activeSlug),
         getAlternatives(activeSlug, 40),
         getOtherStrengths(activeSlug, 20),
         getBrandStrengths(activeSlug, 24),
+        api.history(activeSlug).catch(() => ({ items: [] })),
       ]);
       if (cancelled) return;
       setMedicine(m);
       setAlternatives(alt);
       setOtherStrengths(other);
       setBrandStrengths(strengths);
+      setPriceHistory(history.items);
+      setFavorite(await isFavorite(activeSlug).catch(() => false));
       setLoading(false);
     })();
     return () => {
@@ -96,6 +107,13 @@ export default function MedicineScreen() {
     <>
       <Stack.Screen options={{ title: medicine.brand }} />
       <ScrollView style={{ backgroundColor: theme.bg }} contentContainerStyle={styles.content}>
+        {medicine.image ? (
+          <Image
+            source={{ uri: medicine.image }}
+            style={{ width: "100%", height: 180, marginBottom: space.md, borderRadius: 12 }}
+            resizeMode="contain"
+          />
+        ) : null}
         {/* headline */}
         <View style={styles.header}>
           <View style={styles.chipRow}>
@@ -106,8 +124,24 @@ export default function MedicineScreen() {
             {medicine.strength ? <Chip label={medicine.strength} /> : null}
             <Chip label={formatPack(medicine.packType, medicine.packSize)} />
           </View>
-          <Text style={[styles.brand, { color: theme.text }]}>{medicine.brand}</Text>
-          <Text style={[styles.generic, { color: theme.muted }]}>{medicine.generic ?? "—"}</Text>
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.brand, { color: theme.text }]}>{medicine.brand}</Text>
+              <Text style={[styles.generic, { color: theme.muted }]}>{medicine.generic ?? "—"}</Text>
+            </View>
+            <Pressable
+              hitSlop={10}
+              onPress={async () => {
+                setFavorite(await toggleFavorite(medicine.slug));
+              }}
+            >
+              <MaterialCommunityIcons
+                name={favorite ? "heart" : "heart-outline"}
+                size={26}
+                color={favorite ? theme.danger : theme.muted}
+              />
+            </Pressable>
+          </View>
         </View>
 
         <View style={[styles.priceCard, { backgroundColor: theme.card, borderColor: theme.border }]}>
@@ -205,6 +239,27 @@ export default function MedicineScreen() {
                 onPress={() => setActiveSlug(item.slug)}
               />
             ))}
+          </>
+        ) : null}
+
+        {priceHistory.length > 0 ? (
+          <>
+            <SectionTitle hint={t("priceHistory")}>{t("priceHistory")}</SectionTitle>
+            <View style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
+              {priceHistory.map((row, i) => (
+                <View
+                  key={row.id}
+                  style={[styles.specRow, i > 0 ? { borderTopColor: theme.border, borderTopWidth: StyleSheet.hairlineWidth } : null]}
+                >
+                  <Text style={[styles.specLabel, { color: theme.muted }]}>
+                    {new Date(row.capturedAt).toLocaleDateString()}
+                  </Text>
+                  <Text style={[styles.specValue, { color: theme.text }]}>
+                    {formatPrice(row.price)}
+                  </Text>
+                </View>
+              ))}
+            </View>
           </>
         ) : null}
 

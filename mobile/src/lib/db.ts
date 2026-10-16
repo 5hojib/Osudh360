@@ -36,6 +36,7 @@ export type LocalMedicine = {
   category: string | null;
   categorySlugPath: string | null;
   sourceUrl: string | null;
+  image: string | null;
   updatedAt: string | null;
 };
 
@@ -69,6 +70,7 @@ async function open(): Promise<SQLite.SQLiteDatabase> {
           category          TEXT,
           category_slug_path TEXT,
           source_url        TEXT,
+          image_url         TEXT,
           updated_at        TEXT
         );
 
@@ -94,7 +96,16 @@ async function open(): Promise<SQLite.SQLiteDatabase> {
         );
       `);
 
-      // `brand_base` was added after the first release; patch existing installs
+      // Saved, on-device-only favourites. This table never syncs to the server, so
+      // a favourite survives across catalogue resyncs and works offline.
+  await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS favorites (
+      slug     TEXT PRIMARY KEY,
+      saved_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  // `brand_base` was added after the first release; patch existing installs
       // in place (CREATE TABLE IF NOT EXISTS is a no-op once the table exists).
       const cols = await db.getAllAsync<{ name: string }>("PRAGMA table_info(medicines)");
       if (!cols.some((c) => c.name === "brand_base")) {
@@ -102,6 +113,9 @@ async function open(): Promise<SQLite.SQLiteDatabase> {
           ALTER TABLE medicines ADD COLUMN brand_base TEXT;
           CREATE INDEX IF NOT EXISTS idx_med_brandbase ON medicines (brand_base, company_slug, form);
         `);
+      }
+      if (!cols.some((c) => c.name === "image_url")) {
+        await db.execAsync(`ALTER TABLE medicines ADD COLUMN image_url TEXT;`);
       }
       return db;
     })();
@@ -145,6 +159,7 @@ type SyncRow = {
   category: string | null;
   categorySlugPath: string | null;
   sourceUrl: string | null;
+  image: string | null;
   updatedAt: string | null;
 };
 
@@ -153,10 +168,10 @@ const INSERT_COLUMNS = `(
   id, slug, brand, brand_base, generic, generic_slug, company, company_slug,
   form, strength, strength_value, strength_unit, is_combo,
   pack_type, pack_size, price, currency, category, category_slug_path,
-  source_url, updated_at
+  source_url, image_url, updated_at
 )`;
 
-const COLUMN_COUNT = 21;
+const COLUMN_COUNT = 22;
 
 /** Flattens one sync row into positional values matching INSERT_COLUMNS. */
 function toRowValues(r: SyncRow): (string | number | null)[] {
@@ -181,6 +196,7 @@ function toRowValues(r: SyncRow): (string | number | null)[] {
     r.category,
     r.categorySlugPath,
     r.sourceUrl,
+    r.image,
     r.updatedAt,
   ];
 }
@@ -235,7 +251,7 @@ export async function upsertCatalogue(rows: SyncRow[]): Promise<void> {
            pack_type=excluded.pack_type, pack_size=excluded.pack_size,
            price=excluded.price, currency=excluded.currency,
            category=excluded.category, category_slug_path=excluded.category_slug_path,
-           source_url=excluded.source_url, updated_at=excluded.updated_at`,
+           source_url=excluded.source_url, image_url=excluded.image_url, updated_at=excluded.updated_at`,
         chunk.flatMap(toRowValues),
       );
     }
@@ -286,7 +302,7 @@ const SELECT_COLUMNS = `
   form, strength, strength_value AS strengthValue, strength_unit AS strengthUnit,
   is_combo AS isCombo, pack_type AS packType, pack_size AS packSize,
   price, currency, category, category_slug_path AS categorySlugPath,
-  source_url AS sourceUrl, updated_at AS updatedAt
+  source_url AS sourceUrl, image_url AS image, updated_at AS updatedAt
 `;
 
 /**
@@ -311,6 +327,7 @@ export type SearchOptions = {
   form?: string;
   pack?: string;
   category?: string;
+  company?: string;
   sort?: "brand" | "price_asc" | "price_desc";
   limit?: number;
   offset?: number;
@@ -330,6 +347,33 @@ export async function searchMedicines(opts: SearchOptions = {}): Promise<{ items
   const params: (string | number)[] = [];
 
   const q = opts.q?.trim();
+
+  // Non-text filters are applied before the query is built, so they combine
+  // with the text search instead of being silently ignored.
+  if (opts.form) {
+    where.push("form = ?");
+    params.push(opts.form);
+  }
+  if (opts.pack === "Loose") where.push("pack_size = 1 AND pack_type IN ('Tablet','Capsule')");
+  else if (opts.pack) {
+    const [type, size] = opts.pack.split(":");
+    where.push("pack_type = ?");
+    params.push(type);
+    if (size) {
+      where.push("pack_size = ?");
+      params.push(Number(size));
+    }
+  }
+  if (opts.category) {
+    // Prefix match covers the whole branch of the category tree.
+    where.push("(category_slug_path = ? OR category_slug_path LIKE ?)");
+    params.push(opts.category, `${opts.category}%`);
+  }
+  if (opts.company) {
+    where.push("company_slug = ?");
+    params.push(opts.company);
+  }
+
   if (q) {
     const words = q.split(/\s+/).filter(Boolean).slice(0, 4);
     if (words.length === 0) return { items: [], total: 0 };
@@ -393,26 +437,6 @@ export async function searchMedicines(opts: SearchOptions = {}): Promise<{ items
       ),
     ]);
     return { items: rows, total: countRow?.c ?? rows.length };
-  }
-
-  if (opts.form) {
-    where.push("form = ?");
-    params.push(opts.form);
-  }
-  if (opts.pack === "Loose") where.push("pack_size = 1 AND pack_type IN ('Tablet','Capsule')");
-  else if (opts.pack) {
-    const [type, size] = opts.pack.split(":");
-    where.push("pack_type = ?");
-    params.push(type);
-    if (size) {
-      where.push("pack_size = ?");
-      params.push(Number(size));
-    }
-  }
-  if (opts.category) {
-    // Prefix match covers the whole branch of the category tree.
-    where.push("(category_slug_path = ? OR category_slug_path LIKE ?)");
-    params.push(opts.category, `${opts.category}%`);
   }
 
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
@@ -504,6 +528,23 @@ export async function listGenerics(limit = 200): Promise<{ slug: string; name: s
     `SELECT generic_slug AS slug, generic AS name, COUNT(*) AS brandCount
      FROM medicines WHERE generic_slug IS NOT NULL
      GROUP BY generic_slug ORDER BY brandCount DESC, name ASC LIMIT ?`,
+    [limit],
+  );
+}
+
+export async function listCompanies(
+  limit = 60,
+): Promise<{ slug: string; name: string; count: number }[]> {
+  const db = await open();
+  return db.getAllAsync<{ slug: string; name: string; count: number }>(
+    `SELECT company_slug AS slug,
+            COALESCE(company, company_slug) AS name,
+            COUNT(*) AS count
+       FROM medicines
+      WHERE company_slug IS NOT NULL
+      GROUP BY company_slug
+      ORDER BY count DESC, name ASC
+      LIMIT ?`,
     [limit],
   );
 }
@@ -730,4 +771,35 @@ export async function listPrescriptions(): Promise<PrescriptionRow[]> {
 export async function deletePrescription(id: string): Promise<void> {
   const db = await open();
   await db.runAsync(`DELETE FROM prescriptions WHERE id = ?`, [id]);
+}
+
+/* --------------------------------------------------------------- favourites */
+export async function isFavorite(slug: string): Promise<boolean> {
+  const db = await open();
+  const row = await db.getFirstAsync<{ c: number }>("SELECT COUNT(*) AS c FROM favorites WHERE slug = ?", [slug]);
+  return (row?.c ?? 0) > 0;
+}
+
+export async function toggleFavorite(slug: string): Promise<boolean> {
+  const db = await open();
+  const exists = await isFavorite(slug);
+  if (exists) {
+    await db.runAsync("DELETE FROM favorites WHERE slug = ?", [slug]);
+    return false;
+  }
+  await db.runAsync("INSERT OR IGNORE INTO favorites (slug) VALUES (?)", [slug]);
+  return true;
+}
+
+export async function listFavoriteMedicines(): Promise<LocalMedicine[]> {
+  const db = await open();
+  const slugs = (await db.getAllAsync<{ slug: string }>("SELECT slug FROM favorites ORDER BY saved_at DESC")).map(
+    (r) => r.slug,
+  );
+  if (slugs.length === 0) return [];
+  const placeholders = slugs.map(() => "?").join(",");
+  return db.getAllAsync<LocalMedicine>(
+    `SELECT ${SELECT_COLUMNS} FROM medicines WHERE slug IN (${placeholders})`,
+    slugs,
+  );
 }

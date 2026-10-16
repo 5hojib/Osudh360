@@ -15,7 +15,10 @@ import { useApp } from "../../store";
 import { font, radius, space } from "../../theme";
 import { api } from "../../lib/api";
 import {
+  deletePrescription as deleteLocalPrescription,
   isFluidForm,
+  listPrescriptions as listLocalPrescriptions,
+  savePrescription as saveLocalPrescription,
   searchMedicines,
   type LocalMedicine,
 } from "../../lib/db";
@@ -112,9 +115,7 @@ function scheduleText(it: PrescriptionItem): string {
   if (it.kind === "liquid") {
     const ml = num(it.amount) || 5;
     const times = num(it.timesPerDay) || 1;
-    const chamoch = ml / 5;
-    const chamochTxt = chamoch === 1 ? "১ চামচ" : `${chamoch} চামচ`;
-    return `${chamochTxt} (${ml} ml) × ${times} বার/দিন`;
+    return `${ml} মিলি × ${times} বার/দিন`;
   }
   if (it.kind === "drops") {
     return `${num(it.amount) || 1} ফোঁটা × ${num(it.timesPerDay) || 1} বার/দিন`;
@@ -234,7 +235,20 @@ export default function PrescriptionsScreen() {
         })),
       );
     } catch {
-      setSaved([]);
+      // Offline: show whatever was saved on this device.
+      try {
+        const local = await listLocalPrescriptions();
+        setSaved(
+          local.map((r) => ({
+            id: r.id,
+            title: r.title,
+            createdAt: r.createdAt,
+            payload: JSON.parse(r.payload),
+          })),
+        );
+      } catch {
+        setSaved([]);
+      }
     } finally {
       setLoading(false);
     }
@@ -359,10 +373,14 @@ export default function PrescriptionsScreen() {
       Alert.alert("Empty", "Add at least one medicine.");
       return;
     }
-    const id = Date.now().toString();
+    const id =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `rx-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     const payload = toPayload(items);
     const title = patient.trim() || `Prescription ${new Date().toLocaleDateString()}`;
     await api.prescriptions.save({ id, title, payload });
+    await saveLocalPrescription(id, title, JSON.stringify(payload));
     resetDraft();
     setView("list");
   };
@@ -423,6 +441,7 @@ export default function PrescriptionsScreen() {
                 <Pressable
                   onPress={async () => {
                     await api.prescriptions.remove(row.id);
+                    await deleteLocalPrescription(row.id);
                     await loadSaved();
                   }}
                   style={[styles.smallBtn, { borderColor: theme.border }]}

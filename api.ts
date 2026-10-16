@@ -17,6 +17,7 @@
  *   GET /sync?since=<ISO>              compact rows changed since a timestamp (auth)
  *   GET /medicines?q=&form=&pack=...   search / browse / paginate (auth)
  *   GET /medicines/:slug               one medicine + its alternatives (auth)
+ *   GET /medicines/:slug/history      recent price history (auth)
  *   GET /generics                      generics with brand counts (auth)
  *   GET /generics/:slug                every brand of a generic, by strength (auth)
  *   GET /categories                    therapeutic tree (auth)
@@ -373,6 +374,42 @@ async function handleMedicine(slug: string) {
   });
 }
 
+async function handlePriceHistory(slug: string) {
+  const { rows: medicineRows } = await pool.query<{ id: number }>(
+    `SELECT id FROM medicines WHERE slug = $1 LIMIT 1`,
+    [slug],
+  );
+  const medicine = medicineRows[0];
+  if (!medicine) return json({ error: "not found" }, 404);
+
+  const { rows } = await pool.query<{
+    id: number;
+    price: string | null;
+    currency: string;
+    pack_type: string | null;
+    pack_size: number | null;
+    captured_at: string;
+  }>(
+    `SELECT id, price, currency, pack_type, pack_size, captured_at::text
+       FROM price_history
+      WHERE medicine_id = $1
+      ORDER BY captured_at DESC
+      LIMIT 30`,
+    [medicine.id],
+  );
+
+  return json({
+    items: rows.map((r) => ({
+      id: r.id,
+      price: num(r.price),
+      currency: r.currency,
+      packType: r.pack_type,
+      packSize: r.pack_size,
+      capturedAt: r.captured_at,
+    })),
+  });
+}
+
 async function handleGeneric(slug: string) {
   const { rows: generics } = await pool.query(`SELECT id, name, slug FROM generics WHERE slug = $1`, [slug]);
   const generic = generics[0];
@@ -489,6 +526,9 @@ async function handlePrescriptionDelete(slug: string, userId: string) {
 
 function handleAuthRedirect(url: URL): Response {
   const verifier = url.searchParams.get("neon_auth_session_verifier") ?? "";
+  // Fully encode before interpolation; encodeURIComponent already neutralises
+  // quote/angle-bracket characters, so the value cannot break out of the
+  // JavaScript string or the href attribute below.
   const deepLink = `osudh360://auth-callback?neon_auth_session_verifier=${encodeURIComponent(verifier)}`;
   const html = `<!doctype html>
 <html lang="en">
@@ -558,9 +598,11 @@ const handler = {
       else if (path === "/companies") response = await handleCompanies();
       else if (path === "/auth-redirect") response = handleAuthRedirect(url);
       else {
+        const medicineHistory = path.match(/^\/medicines\/([^/]+)\/history$/);
         const medicine = path.match(/^\/medicines\/([^/]+)$/);
         const generic = path.match(/^\/generics\/([^/]+)$/);
-        if (medicine) response = await handleMedicine(decodeURIComponent(medicine[1]));
+        if (medicineHistory) response = await handlePriceHistory(decodeURIComponent(medicineHistory[1]));
+        else if (medicine) response = await handleMedicine(decodeURIComponent(medicine[1]));
         else if (generic) response = await handleGeneric(decodeURIComponent(generic[1]));
         else response = json({ error: "not found" }, 404);
       }

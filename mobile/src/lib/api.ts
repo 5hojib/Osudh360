@@ -121,6 +121,18 @@ export const api = {
     return getJson<{ items: Medicine[]; total: number }>(`/medicines?${qs}`, signal);
   },
 
+  history: (slug: string, signal?: AbortSignal) =>
+    getJson<{
+      items: {
+        id: number;
+        price: number | null;
+        currency: string;
+        packType: string | null;
+        packSize: number | null;
+        capturedAt: string;
+      }[];
+    }>(`/medicines/${encodeURIComponent(slug)}/history`, signal),
+
   prescriptions: {
     list: (signal?: AbortSignal) =>
       getJson<{ items: { id: string; title: string; payload: unknown; updatedAt: string }[] }>("/prescriptions", signal),

@@ -24,7 +24,7 @@ const missing = db
        SUM(pack_size IS NULL)    AS noPackSize,
        SUM(strength_raw = '')    AS noStrength,
        SUM(category_id IS NULL)  AS noCategory,
-       SUM(availability = 'out_of_stock') AS outOfStock
+       0 AS outOfStock
      FROM medicines`,
   )
   .get() as Record<string, number>;

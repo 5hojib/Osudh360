@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { FlatList, RefreshControl, StyleSheet, Text, View } from "react-native";
+import { FlatList, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
 import { EmptyState, Loading, BrandRow, SearchField, SyncBar, useFormatPack } from "../../components/ui";
-import { groupByBrand, searchMedicines, type LocalMedicine } from "../../lib/db";
+import { groupByBrand, listCompanies, searchMedicines, type LocalMedicine } from "../../lib/db";
 import { useApp } from "../../store";
 import { useT } from "../../lib/i18n";
 import { font, space } from "../../theme";
@@ -22,21 +22,28 @@ export default function SearchScreen() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [companies, setCompanies] = useState<{ slug: string; name: string; count: number }[]>([]);
+  const [selectedCompany, setSelectedCompany] = useState<string | undefined>(undefined);
 
   const catalogueReady = sync.count > 0;
+
+  useEffect(() => {
+    if (!catalogueReady) return;
+    void listCompanies(30).then(setCompanies).catch(() => setCompanies([]));
+  }, [catalogueReady, version]);
 
   const load = useCallback(
     async (q: string, offset: number) => {
       setLoading(true);
       try {
-        const res = await searchMedicines({ q, limit: PAGE_SIZE, offset });
+        const res = await searchMedicines({ q, company: selectedCompany, limit: PAGE_SIZE, offset });
         setItems((prev) => (offset === 0 ? res.items : [...prev, ...res.items]));
         setTotal(res.total);
       } finally {
         setLoading(false);
       }
     },
-    [],
+    [selectedCompany],
   );
 
   // Re-query whenever the query, the page, or the cached catalogue changes.
@@ -67,6 +74,41 @@ export default function SearchScreen() {
           <Text style={[styles.subtitle, { color: theme.muted }]}>{t("homeSubtitle")}</Text>
         </View>
 
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={{ gap: space.sm, paddingVertical: space.sm }}
+          style={{ marginBottom: space.sm }}
+        >
+          <Pressable
+            onPress={() => setSelectedCompany(undefined)}
+            style={[
+              styles.companyChip,
+              { backgroundColor: selectedCompany ? theme.card : theme.accent, borderColor: theme.border },
+            ]}
+          >
+            <Text style={{ color: selectedCompany ? theme.text : "#fff", fontFamily: font.regular, fontSize: 12 }}>
+              All companies
+            </Text>
+          </Pressable>
+          {companies.map((c) => (
+            <Pressable
+              key={c.slug}
+              onPress={() => setSelectedCompany(c.slug)}
+              style={[
+                styles.companyChip,
+                { backgroundColor: selectedCompany === c.slug ? theme.accent : theme.card, borderColor: theme.border },
+              ]}
+            >
+              <Text
+                style={{ color: selectedCompany === c.slug ? "#fff" : theme.text, fontFamily: font.regular, fontSize: 12 }}
+              >
+                {c.name}
+              </Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+
         <SearchField value={query} onChangeText={setQuery} placeholder={t("searchPlaceholder")} />
 
         {!query && catalogueReady ? (
@@ -91,7 +133,7 @@ export default function SearchScreen() {
         ) : null}
       </View>
     ),
-    [query, theme, catalogueReady, total, t],
+    [companies, query, selectedCompany, theme, catalogueReady, total, t],
   );
 
   if (!catalogueReady) {
@@ -157,6 +199,12 @@ export default function SearchScreen() {
 const styles = StyleSheet.create({
   screen: { flex: 1 },
   content: { padding: space.lg, paddingBottom: space.xxl },
+  companyChip: {
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: space.md,
+    paddingVertical: 6,
+  },
   intro: { marginBottom: space.lg, marginTop: space.sm },
   title: { fontSize: 26, fontFamily: font.semibold },
   subtitle: { fontSize: 13, fontFamily: font.regular, marginTop: 4, lineHeight: 20 },

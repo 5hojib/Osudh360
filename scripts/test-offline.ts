@@ -42,6 +42,7 @@ db.exec(`
     category          TEXT,
     category_slug_path TEXT,
     source_url        TEXT,
+    image_url         TEXT,
     updated_at        TEXT
   );
   CREATE INDEX idx_med_brand   ON medicines (brand);
@@ -90,6 +91,11 @@ let after: number | null = null;
 for (;;) {
   const qs = after != null ? `?limit=5000&after=${after}` : "?limit=5000";
   const res = await fetch(`${API_URL}/sync${qs}`, { headers });
+  if (!res.ok) {
+    console.error(`✗ API returned ${res.status}: ${await res.text().catch(() => "")}`);
+    console.error("  Set API_TOKEN in the environment to an authenticated JWT, then re-run.");
+    process.exit(1);
+  }
   const page = (await res.json()) as {
     items: Record<string, unknown>[];
     hasMore: boolean;
@@ -116,7 +122,7 @@ function searchMedicines(q: string, limit = 20) {
     .map(() => "(LOWER(brand) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(generic,'')) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(company,'')) LIKE ? ESCAPE '\\')")
     .join(" OR ")})`;
   const params: string[] = [];
-  for (const w of lowered) params.push(likeTerm(w), likeTerm(w));
+  for (const w of lowered) params.push(likeTerm(w), likeTerm(w), likeTerm(w));
 
   const prefixes = lowered.map((w) => likePrefix(w));
   const anyContains = likeTerm(q.toLowerCase());
