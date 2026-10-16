@@ -85,6 +85,13 @@ async function open(): Promise<SQLite.SQLiteDatabase> {
           key   TEXT PRIMARY KEY,
           value TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS prescriptions (
+          id         TEXT PRIMARY KEY,
+          title      TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          payload   TEXT NOT NULL
+        );
       `);
 
       // `brand_base` was added after the first release; patch existing installs
@@ -697,4 +704,30 @@ export async function getBrandStrengths(slug: string, limit = 24): Promise<Local
      LIMIT ?`,
     [slug, slug, slug, limit],
   );
+}
+
+
+/* -------------------------------------------------------------- prescriptions */
+export type PrescriptionRow = { id: string; title: string; createdAt: string; payload: string };
+
+export async function savePrescription(id: string, title: string, payload: string): Promise<void> {
+  const db = await open();
+  await db.runAsync(
+    `INSERT INTO prescriptions (id, title, created_at, payload) VALUES (?, ?, ?, ?)
+     ON CONFLICT (id) DO UPDATE SET title=excluded.title, created_at=excluded.created_at, payload=excluded.payload`,
+    [id, title, new Date().toISOString(), payload],
+  );
+}
+
+export async function listPrescriptions(): Promise<PrescriptionRow[]> {
+  const db = await open();
+  const rows = await db.getAllAsync<PrescriptionRow>(
+    `SELECT id, title, created_at AS createdAt, payload FROM prescriptions ORDER BY created_at DESC`,
+  );
+  return rows ?? [];
+}
+
+export async function deletePrescription(id: string): Promise<void> {
+  const db = await open();
+  await db.runAsync(`DELETE FROM prescriptions WHERE id = ?`, [id]);
 }

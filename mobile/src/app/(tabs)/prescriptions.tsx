@@ -1,0 +1,481 @@
+import React, { useEffect, useState } from "react";
+import {
+  ActivityIndicator,
+  Alert,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
+import * as Print from "expo-print";
+import * as Sharing from "expo-sharing";
+import { useApp } from "../../store";
+import { font, radius, space } from "../../theme";
+import {
+  deletePrescription,
+  listPrescriptions,
+  savePrescription,
+  searchMedicines,
+  type LocalMedicine,
+  type PrescriptionRow,
+} from "../../lib/db";
+
+type PrescriptionItem = {
+  medicine: LocalMedicine;
+  unitsPerDay: string;
+  days: string;
+};
+
+type PrescriptionPayload = {
+  doctor: string;
+  patient: string;
+  showPrices: boolean;
+  items: { medicine: LocalMedicine; unitsPerDay: number; days: number }[];
+};
+
+function unitPrice(m: LocalMedicine): number | null {
+  if (m.price == null || !Number.isFinite(m.price)) return null;
+  if (m.packSize && m.packSize > 0) return m.price / m.packSize;
+  return m.price;
+}
+
+function totalUnits(it: PrescriptionItem): number {
+  const u = Number(it.unitsPerDay) || 0;
+  const d = Number(it.days) || 0;
+  return u * d;
+}
+
+function subtotal(it: PrescriptionItem): number | null {
+  const up = unitPrice(it.medicine);
+  if (up == null) return null;
+  return up * totalUnits(it);
+}
+
+function escapeHtml(v: string): string {
+  return v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function buildPdfHtml(p: PrescriptionPayload): string {
+  const rows = p.items
+    .map((it, i) => {
+      const up = unitPrice(it.medicine);
+      const total = up == null ? null : up * it.unitsPerDay * it.days;
+      const priceCells = p.showPrices
+        ? `<td>${up == null ? "—" : up.toFixed(2)}</td><td>${total == null ? "—" : total.toFixed(2)}</td>`
+        : "";
+      return `<tr>
+        <td>${i + 1}</td>
+        <td>${escapeHtml(it.medicine.brand)}<br/><small>${escapeHtml(it.medicine.generic ?? "")} ${escapeHtml(it.medicine.strength)}</small></td>
+        <td>${escapeHtml(it.medicine.form)}</td>
+        <td>${it.unitsPerDay}</td>
+        <td>${it.days}</td>
+        <td>${it.unitsPerDay * it.days}</td>
+        ${priceCells}
+      </tr>`;
+    })
+    .join("");
+
+  const grand = p.showPrices
+    ? p.items.reduce((s, it) => {
+        const up = unitPrice(it.medicine);
+        return s + (up == null ? 0 : up * it.unitsPerDay * it.days);
+      }, 0)
+    : null;
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<style>
+  body { font-family: -apple-system, "Hind Siliguri", sans-serif; padding: 28px; color: #10221f; }
+  .head { display:flex; justify-content:space-between; border-bottom:2px solid #0f766e; padding-bottom:12px; margin-bottom:18px; }
+  .title { font-size:22px; font-weight:700; color:#0f766e; margin:0; }
+  .meta { font-size:12px; color:#5d6f6b; margin:2px 0; }
+  table { width:100%; border-collapse:collapse; margin-top:12px; font-size:12px; }
+  th,td { border:1px solid #e2e8e6; padding:6px 8px; text-align:left; }
+  th { background:#d6f0ec; }
+  .tot { text-align:right; font-weight:700; }
+  .foot { margin-top:24px; font-size:11px; color:#8a9a96; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <div>
+      <h1 class="title">Osudh360 — Prescription</h1>
+      <p class="meta">Date: ${escapeHtml(new Date().toLocaleDateString())}</p>
+      ${p.patient ? `<p class="meta">Patient: ${escapeHtml(p.patient)}</p>` : ""}
+    </div>
+    <div>
+      ${p.doctor ? `<p class="meta">Doctor: ${escapeHtml(p.doctor)}</p>` : ""}
+      <p class="meta">${p.showPrices ? "Price list included" : "Doctor copy (no prices)"}</p>
+    </div>
+  </div>
+  <table>
+    <thead><tr>
+      <th>#</th><th>Medicine</th><th>Form</th><th>Units/day</th><th>Days</th><th>Total units</th>
+      ${p.showPrices ? "<th>Unit price</th><th>Subtotal</th>" : ""}
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>
+  ${p.showPrices && grand != null ? `<p class="tot">Estimated total: ${grand.toFixed(2)} BDT</p>` : ""}
+  <p class="foot">Information only — not medical advice. Verify brand, strength and expiry on the pack before use.</p>
+</body>
+</html>`;
+}
+
+export default function PrescriptionsScreen() {
+  const { theme } = useApp();
+
+  const [view, setView] = useState<"list" | "edit" | "detail">("list");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [doctor, setDoctor] = useState("");
+  const [patient, setPatient] = useState("");
+  const [showPrices, setShowPrices] = useState(true);
+  const [items, setItems] = useState<PrescriptionItem[]>([]);
+  const [search, setSearch] = useState("");
+  const [results, setResults] = useState<LocalMedicine[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [saved, setSaved] = useState<PrescriptionRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [printing, setPrinting] = useState(false);
+  const [openPayload, setOpenPayload] = useState<PrescriptionPayload | null>(null);
+
+  const loadSaved = async () => {
+    setLoading(true);
+    try {
+      setSaved(await listPrescriptions());
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (view === "list") void loadSaved();
+  }, [view]);
+
+  useEffect(() => {
+    if (search.trim().length < 2) {
+      setResults([]);
+      return;
+    }
+    setSearching(true);
+    searchMedicines({ q: search, limit: 8 })
+      .then((r) => setResults(r.items))
+      .catch(() => setResults([]))
+      .finally(() => setSearching(false));
+  }, [search]);
+
+  const resetDraft = () => {
+    setDoctor("");
+    setPatient("");
+    setShowPrices(true);
+    setItems([]);
+    setSearch("");
+    setResults([]);
+    setEditingId(null);
+  };
+
+  const addItem = (m: LocalMedicine) => {
+    if (items.some((it) => it.medicine.id === m.id)) return;
+    setItems((prev) => [...prev, { medicine: m, unitsPerDay: "1", days: "7" }]);
+    setSearch("");
+    setResults([]);
+  };
+
+  const removeItem = (id: number) => setItems((prev) => prev.filter((it) => it.medicine.id !== id));
+
+  const updateItem = (id: number, field: "unitsPerDay" | "days", value: string) => {
+    setItems((prev) => prev.map((it) => (it.medicine.id === id ? { ...it, [field]: value } : it)));
+  };
+
+  const saveCurrent = async () => {
+    if (items.length === 0) {
+      Alert.alert("Empty", "Add at least one medicine.");
+      return;
+    }
+    const id = editingId ?? Date.now().toString();
+    const payload: PrescriptionPayload = {
+      doctor: doctor.trim(),
+      patient: patient.trim(),
+      showPrices,
+      items: items.map((it) => ({
+        medicine: it.medicine,
+        unitsPerDay: Number(it.unitsPerDay) || 0,
+        days: Number(it.days) || 0,
+      })),
+    };
+    const title = patient.trim() || `Prescription ${new Date().toLocaleDateString()}`;
+    await savePrescription(id, title, JSON.stringify(payload));
+    resetDraft();
+    setView("list");
+  };
+
+  const doPrint = async (payload: PrescriptionPayload) => {
+    setPrinting(true);
+    try {
+      const html = buildPdfHtml(payload);
+      const { uri } = await Print.printToFileAsync({ html });
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(uri, { mimeType: "application/pdf", UTI: "com.adobe.pdf" });
+      } else {
+        Alert.alert("Saved", `PDF saved to ${uri}`);
+      }
+    } catch (e) {
+      Alert.alert("Print failed", e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setPrinting(false);
+    }
+  };
+
+  // ---------- List view ----------
+  if (view === "list") {
+    return (
+      <View style={[styles.screen, { backgroundColor: theme.bg }]}>
+        <View style={styles.headerRow}>
+          <Text style={[styles.title, { color: theme.text }]}>Prescriptions</Text>
+          <Pressable
+            onPress={() => {
+              resetDraft();
+              setView("edit");
+            }}
+            style={[styles.primaryBtn, { backgroundColor: theme.accent }]}
+          >
+            <Text style={styles.primaryBtnText}>+ New</Text>
+          </Pressable>
+        </View>
+
+        <ScrollView contentContainerStyle={styles.content}>
+          {loading ? <ActivityIndicator color={theme.accent} /> : null}
+          {!loading && saved.length === 0 ? (
+            <Text style={[styles.muted, { color: theme.muted }]}>No prescriptions saved yet.</Text>
+          ) : null}
+          {saved.map((row) => (
+            <View key={row.id} style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
+              <Text style={[styles.cardTitle, { color: theme.text }]}>{row.title}</Text>
+              <Text style={[styles.muted, { color: theme.faint }]}>{new Date(row.createdAt).toLocaleString()}</Text>
+              <View style={styles.actionRow}>
+                <Pressable
+                  onPress={() => {
+                    const p = JSON.parse(row.payload) as PrescriptionPayload;
+                    setOpenPayload(p);
+                    setView("detail");
+                  }}
+                  style={[styles.smallBtn, { borderColor: theme.border }]}
+                >
+                  <Text style={[styles.smallBtnText, { color: theme.text }]}>View</Text>
+                </Pressable>
+                <Pressable
+                  onPress={async () => {
+                    await deletePrescription(row.id);
+                    await loadSaved();
+                  }}
+                  style={[styles.smallBtn, { borderColor: theme.border }]}
+                >
+                  <Text style={[styles.smallBtnText, { color: theme.danger }]}>Delete</Text>
+                </Pressable>
+              </View>
+            </View>
+          ))}
+        </ScrollView>
+      </View>
+    );
+  }
+
+  // ---------- Detail view ----------
+  if (view === "detail" && openPayload) {
+    return (
+      <View style={[styles.screen, { backgroundColor: theme.bg }]}>
+        <View style={styles.headerRow}>
+          <Pressable onPress={() => setView("list")} style={styles.backBtn}>
+            <Text style={[styles.backText, { color: theme.accent }]}>‹ Back</Text>
+          </Pressable>
+          <Text style={[styles.title, { color: theme.text }]}>Prescription</Text>
+          <View style={{ width: 60 }} />
+        </View>
+        <ScrollView contentContainerStyle={styles.content}>
+          {openPayload.doctor ? <Text style={[styles.muted, { color: theme.text }]}>Doctor: {openPayload.doctor}</Text> : null}
+          {openPayload.patient ? <Text style={[styles.muted, { color: theme.text }]}>Patient: {openPayload.patient}</Text> : null}
+          {openPayload.items.map((it, i) => (
+            <View key={it.medicine.id + i} style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
+              <Text style={[styles.cardTitle, { color: theme.text }]}>{it.medicine.brand}</Text>
+              <Text style={[styles.muted, { color: theme.muted }]}>
+                {it.medicine.generic ?? ""} · {it.medicine.strength} · {it.medicine.form}
+              </Text>
+              <Text style={[styles.muted, { color: theme.text }]}>
+                {it.unitsPerDay} units/day × {it.days} days = {it.unitsPerDay * it.days} units
+              </Text>
+              {openPayload.showPrices ? (
+                <Text style={[styles.muted, { color: theme.accent }]}>
+                  Subtotal: {unitPrice(it.medicine) == null ? "—" : (unitPrice(it.medicine)! * it.unitsPerDay * it.days).toFixed(2)} BDT
+                </Text>
+              ) : null}
+            </View>
+          ))}
+          <Pressable
+            disabled={printing}
+            onPress={() => doPrint(openPayload)}
+            style={[styles.primaryBtn, { backgroundColor: theme.accent, marginTop: space.md }]}
+          >
+            {printing ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryBtnText}>Print / Save PDF</Text>}
+          </Pressable>
+        </ScrollView>
+      </View>
+    );
+  }
+
+  // ---------- Edit view ----------
+  return (
+    <View style={[styles.screen, { backgroundColor: theme.bg }]}>
+      <View style={styles.headerRow}>
+        <Pressable onPress={() => {
+          resetDraft();
+          setView("list");
+        }} style={styles.backBtn}>
+          <Text style={[styles.backText, { color: theme.accent }]}>‹ Back</Text>
+        </Pressable>
+        <Text style={[styles.title, { color: theme.text }]}>{editingId ? "Edit" : "New prescription"}</Text>
+        <View style={{ width: 60 }} />
+      </View>
+
+      <ScrollView contentContainerStyle={styles.content}>
+        <Text style={[styles.label, { color: theme.muted }]}>Doctor</Text>
+        <TextInput
+          value={doctor}
+          onChangeText={setDoctor}
+          placeholder="Doctor name"
+          placeholderTextColor={theme.faint}
+          style={[styles.input, { color: theme.text, borderColor: theme.border, backgroundColor: theme.card }]}
+        />
+
+        <Text style={[styles.label, { color: theme.muted }]}>Patient</Text>
+        <TextInput
+          value={patient}
+          onChangeText={setPatient}
+          placeholder="Patient name"
+          placeholderTextColor={theme.faint}
+          style={[styles.input, { color: theme.text, borderColor: theme.border, backgroundColor: theme.card }]}
+        />
+
+        <View style={styles.row}>
+          <Text style={[styles.label, { color: theme.muted }]}>Show prices</Text>
+          <Pressable
+            onPress={() => setShowPrices((v) => !v)}
+            style={[styles.toggle, { backgroundColor: showPrices ? theme.accent : theme.card, borderColor: theme.border }]}
+          >
+            <Text style={{ color: showPrices ? "#fff" : theme.text, fontFamily: font.regular }}>{showPrices ? "On" : "Off (doctor)"}</Text>
+          </Pressable>
+        </View>
+
+        <Text style={[styles.section, { color: theme.text }]}>Medicines</Text>
+        <TextInput
+          value={search}
+          onChangeText={setSearch}
+          placeholder="Search medicine to add…"
+          placeholderTextColor={theme.faint}
+          style={[styles.input, { color: theme.text, borderColor: theme.border, backgroundColor: theme.card }]}
+        />
+        {searching ? <ActivityIndicator color={theme.accent} /> : null}
+        {results.map((m) => (
+          <Pressable key={m.id} onPress={() => addItem(m)} style={[styles.resultRow, { borderColor: theme.border, backgroundColor: theme.card }]}>
+            <Text style={[styles.resultName, { color: theme.text }]}>{m.brand}</Text>
+            <Text style={[styles.resultSub, { color: theme.muted }]}>{m.generic ?? ""} · {m.strength} · {m.form}</Text>
+          </Pressable>
+        ))}
+
+        {items.map((it) => (
+          <View key={it.medicine.id} style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
+            <View style={styles.row}>
+              <Text style={[styles.cardTitle, { color: theme.text }]}>{it.medicine.brand}</Text>
+              <Pressable onPress={() => removeItem(it.medicine.id)}>
+                <Text style={{ color: theme.danger }}>✕</Text>
+              </Pressable>
+            </View>
+            <Text style={[styles.muted, { color: theme.muted }]}>{it.medicine.generic ?? ""} · {it.medicine.strength} · {it.medicine.form}</Text>
+            <View style={styles.row}>
+              <View style={styles.fieldCol}>
+                <Text style={[styles.label, { color: theme.muted }]}>Units/day</Text>
+                <TextInput
+                  value={it.unitsPerDay}
+                  onChangeText={(v) => updateItem(it.medicine.id, "unitsPerDay", v)}
+                  keyboardType="numeric"
+                  style={[styles.smallInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
+                />
+              </View>
+              <View style={styles.fieldCol}>
+                <Text style={[styles.label, { color: theme.muted }]}>Days</Text>
+                <TextInput
+                  value={it.days}
+                  onChangeText={(v) => updateItem(it.medicine.id, "days", v)}
+                  keyboardType="numeric"
+                  style={[styles.smallInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
+                />
+              </View>
+              <View style={styles.fieldCol}>
+                <Text style={[styles.label, { color: theme.muted }]}>Total</Text>
+                <Text style={[styles.totalText, { color: theme.accent }]}>{totalUnits(it)} units</Text>
+              </View>
+            </View>
+            {it.medicine.price != null ? (
+              <Text style={[styles.muted, { color: theme.muted }]}>
+                Est. cost: {subtotal(it) == null ? "—" : subtotal(it)!.toFixed(2)} BDT
+              </Text>
+            ) : null}
+          </View>
+        ))}
+
+        <View style={styles.actionRow}>
+          <Pressable onPress={saveCurrent} style={[styles.primaryBtn, { backgroundColor: theme.accent, flex: 1 }]}>
+            <Text style={styles.primaryBtnText}>Save prescription</Text>
+          </Pressable>
+          <Pressable
+            disabled={items.length === 0 || printing}
+            onPress={() => {
+              const payload: PrescriptionPayload = {
+                doctor: doctor.trim(),
+                patient: patient.trim(),
+                showPrices,
+                items: items.map((it) => ({ medicine: it.medicine, unitsPerDay: Number(it.unitsPerDay) || 0, days: Number(it.days) || 0 })),
+              };
+              void doPrint(payload);
+            }}
+            style={[styles.secondaryBtn, { borderColor: theme.border, flex: 1 }]}
+          >
+            {printing ? <ActivityIndicator color={theme.accent} /> : <Text style={[styles.secondaryBtnText, { color: theme.accent }]}>Print / PDF</Text>}
+          </Pressable>
+        </View>
+      </ScrollView>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  screen: { flex: 1 },
+  headerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: space.lg, paddingVertical: space.md },
+  title: { fontSize: 20, fontFamily: font.semibold },
+  backBtn: { width: 60 },
+  backText: { fontSize: 15, fontFamily: font.regular },
+  content: { padding: space.lg, paddingBottom: space.xxl, gap: space.md },
+  label: { fontSize: 12, fontFamily: font.regular, marginBottom: 4, marginTop: space.sm },
+  section: { fontSize: 16, fontFamily: font.semibold, marginTop: space.md },
+  input: { borderWidth: 1, borderRadius: radius.md, paddingHorizontal: space.md, paddingVertical: space.sm, fontSize: 14, fontFamily: font.regular },
+  smallInput: { borderWidth: 1, borderRadius: radius.md, paddingHorizontal: space.sm, paddingVertical: 6, fontSize: 13, fontFamily: font.regular, width: 70 },
+  primaryBtn: { paddingVertical: space.md, borderRadius: radius.pill, alignItems: "center", justifyContent: "center" },
+  primaryBtnText: { color: "#fff", fontSize: 14, fontFamily: font.semibold },
+  secondaryBtn: { paddingVertical: space.md, borderRadius: radius.pill, borderWidth: 1, alignItems: "center", justifyContent: "center" },
+  secondaryBtnText: { fontSize: 14, fontFamily: font.semibold },
+  card: { borderWidth: 1, borderRadius: radius.lg, padding: space.md, gap: 6 },
+  cardTitle: { fontSize: 15, fontFamily: font.semibold },
+  muted: { fontSize: 12, fontFamily: font.regular },
+  row: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: space.sm, flexWrap: "wrap" },
+  fieldCol: { alignItems: "flex-start", gap: 4 },
+  totalText: { fontSize: 13, fontFamily: font.semibold },
+  toggle: { paddingHorizontal: space.md, paddingVertical: 6, borderRadius: radius.pill, borderWidth: 1 },
+  resultRow: { borderWidth: 1, borderRadius: radius.md, padding: space.sm, gap: 2 },
+  resultName: { fontSize: 14, fontFamily: font.semibold },
+  resultSub: { fontSize: 11, fontFamily: font.regular },
+  actionRow: { flexDirection: "row", gap: space.sm, marginTop: space.md },
+  smallBtn: { borderWidth: 1, borderRadius: radius.pill, paddingHorizontal: space.md, paddingVertical: 6 },
+  smallBtnText: { fontSize: 12, fontFamily: font.regular },
+});

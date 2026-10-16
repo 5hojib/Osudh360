@@ -64,6 +64,13 @@ export default function TabsLayout() {
         }}
       />
       <Tabs.Screen
+        name="prescriptions"
+        options={{
+          title: "Prescriptions",
+          tabBarIcon: ({ color }) => <TabIcon glyph="Rx" color={color} />,
+        }}
+      />
+      <Tabs.Screen
         name="about"
         options={{
           title: t("tabAbout"),
