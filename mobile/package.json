@@ -1,6 +1,6 @@
 {
   "name": "osudh360-mobile",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "main": "expo-router/entry",
   "private": true,
   "scripts": {

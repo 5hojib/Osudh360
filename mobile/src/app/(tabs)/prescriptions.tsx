@@ -28,6 +28,7 @@ type PrescriptionItem = {
   medicine: LocalMedicine;
   kind: DoseKind;
   slots: DoseSlots;
+  doseCount: number;
   amount: string; // ml / drops / applications per dose
   timesPerDay: string;
   days: string;
@@ -40,6 +41,7 @@ type PrescriptionPayloadItem = {
   medicine: LocalMedicine;
   kind: DoseKind;
   slots?: DoseSlots;
+  doseCount?: number;
   amount?: number;
   timesPerDay?: number;
   days: number;
@@ -120,7 +122,10 @@ function scheduleText(it: PrescriptionItem): string {
   if (it.kind === "application") {
     return `${num(it.timesPerDay) || 1} বার লাগান/দিন`;
   }
-  return `${it.slots.morning}+${it.slots.noon}+${it.slots.evening}+${it.slots.night} (সকাল/দুপুর/বিকাল/রাত)`;
+  const n = it.doseCount ?? 3;
+  const vals = [it.slots.morning, it.slots.noon, it.slots.evening, it.slots.night].slice(0, n);
+  const labs = ["সকাল", "দুপুর", "বিকাল", "রাত"].slice(0, n).join("/");
+  return `${vals.join("+")} (${labs})`;
 }
 
 function buildPdfHtml(p: PrescriptionPayload): string {
@@ -301,6 +306,7 @@ export default function PrescriptionsScreen() {
       {
         medicine: m,
         kind,
+        doseCount: 3,
         slots: { morning: kind === "solid" ? "1" : "0", noon: "0", evening: "0", night: kind === "solid" ? "1" : "0" },
         amount: kind === "liquid" ? "5" : kind === "drops" ? "1" : "1",
         timesPerDay: kind === "solid" ? "2" : "3",
@@ -337,6 +343,7 @@ export default function PrescriptionsScreen() {
         medicine: it.medicine,
         kind: it.kind,
         slots: it.kind === "solid" ? it.slots : undefined,
+        doseCount: it.kind === "solid" ? it.doseCount : undefined,
         amount: it.kind === "liquid" || it.kind === "drops" || it.kind === "application" ? num(it.amount || it.timesPerDay) : undefined,
         timesPerDay: it.kind === "application" ? num(it.timesPerDay) : num(it.timesPerDay),
         days: Number(it.days) || 0,
@@ -604,7 +611,17 @@ export default function PrescriptionsScreen() {
 
             {!it.customSchedule.trim() && (it.kind === "solid") ? (
               <View style={styles.row}>
-                {SLOT_LABELS.map((lab, idx) => {
+                <Text style={[styles.label, { color: theme.muted, marginTop: 0 }]}>Doses/day</Text>
+                {[2, 3, 4].map((n) => (
+                  <Pressable key={n} onPress={() => updateItem(it.medicine.id, { doseCount: n })} style={[styles.filterChip, { backgroundColor: it.doseCount === n ? theme.accent : theme.card, borderColor: theme.border }]}>
+                    <Text style={{ color: it.doseCount === n ? "#fff" : theme.text, fontFamily: font.regular, fontSize: 12 }}>{n}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            ) : null}
+            {!it.customSchedule.trim() && (it.kind === "solid") ? (
+              <View style={styles.row}>
+                {SLOT_LABELS.slice(0, it.doseCount).map((lab, idx) => {
                   const key = (["morning", "noon", "evening", "night"] as (keyof DoseSlots)[])[idx];
                   return (
                     <View key={key} style={styles.fieldCol}>
@@ -712,6 +729,7 @@ class PayloadItem implements PrescriptionItem {
   medicine: LocalMedicine;
   kind: DoseKind;
   slots: DoseSlots;
+  doseCount: number;
   amount: string;
   timesPerDay: string;
   days: string;
@@ -722,6 +740,7 @@ class PayloadItem implements PrescriptionItem {
     this.medicine = p.medicine;
     this.kind = p.kind;
     this.slots = p.slots ?? { morning: "1", noon: "0", evening: "0", night: "1" };
+    this.doseCount = p.doseCount ?? 3;
     this.amount = String(p.amount ?? (p.kind === "drops" ? 1 : p.kind === "liquid" ? 5 : 1));
     this.timesPerDay = String(p.timesPerDay ?? (p.kind === "solid" ? 2 : 3));
     this.days = String(p.days ?? 0);
