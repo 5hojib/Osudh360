@@ -35,7 +35,7 @@ jobs:
     # Generous: the first run has an empty Gradle cache and RN's new
     # architecture compiles native code, so the NDK/CMake download alone
     # can take a while.
-    timeout-minutes: 90
+    timeout-minutes: 60
 
     # ccache accelerates the repeated NDK/CMake C++ compilation of the native
     # modules (reanimated, worklets, screens, gesture-handler, expo-modules-core),
@@ -150,7 +150,8 @@ jobs:
         env:
           NDK_CCACHE: ccache
         run: |
-          ./gradlew assembleRelease --build-cache --stacktrace \
+          ./gradlew assembleRelease --build-cache \
+            -Dorg.gradle.parallel=true -Dorg.gradle.caching=true -Dorg.gradle.workers.max=4 \
             -x lintVitalAnalyzeRelease \
             -PreactNativeArchitectures=arm64-v8a \
             -POSUDH360_STORE_FILE=osudh360-release.keystore \
