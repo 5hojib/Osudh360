@@ -14,22 +14,42 @@ import * as Sharing from "expo-sharing";
 import { useApp } from "../../store";
 import { font, radius, space } from "../../theme";
 import { api } from "../../lib/api";
-import { searchMedicines, type LocalMedicine } from "../../lib/db";
+import {
+  isFluidForm,
+  searchMedicines,
+  type LocalMedicine,
+} from "../../lib/db";
+
+type DoseSlots = { morning: string; noon: string; night: string };
 
 type PrescriptionItem = {
   medicine: LocalMedicine;
-  unitsPerDay: string;
+  kind: "solid" | "liquid";
+  // solid tablet/capsule pattern, e.g. 1 | 0 | 1
+  slots: DoseSlots;
+  // liquid (syrup etc.)
+  mlPerDose: string;
+  timesPerDay: string;
   days: string;
+  directions: string;
 };
-
-type CloudPrescription = { id: string; title: string; createdAt: string; payload: unknown };
 
 type PrescriptionPayload = {
   doctor: string;
   patient: string;
   showPrices: boolean;
-  items: { medicine: LocalMedicine; unitsPerDay: number; days: number }[];
+  items: {
+    medicine: LocalMedicine;
+    kind: "solid" | "liquid";
+    slots?: DoseSlots;
+    mlPerDose?: number;
+    timesPerDay?: number;
+    days: number;
+    directions: string;
+  }[];
 };
+
+type CloudPrescription = { id: string; title: string; createdAt: string; payload: unknown };
 
 function unitPrice(m: LocalMedicine): number | null {
   if (m.price == null || !Number.isFinite(m.price)) return null;
@@ -37,37 +57,63 @@ function unitPrice(m: LocalMedicine): number | null {
   return m.price;
 }
 
-function totalUnits(it: PrescriptionItem): number {
-  const u = Number(it.unitsPerDay) || 0;
-  const d = Number(it.days) || 0;
-  return u * d;
+function num(v: string | number | undefined | null): number {
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function solidPerDay(slots: DoseSlots): number {
+  return num(slots.morning) + num(slots.noon) + num(slots.night);
+}
+
+function perDayQty(it: PrescriptionItem): number {
+  if (it.kind === "liquid") return num(it.mlPerDose) * num(it.timesPerDay);
+  return solidPerDay(it.slots);
+}
+
+function totalQty(it: PrescriptionItem): number {
+  return perDayQty(it) * (Number(it.days) || 0);
 }
 
 function subtotal(it: PrescriptionItem): number | null {
+  if (it.kind === "liquid") return null;
   const up = unitPrice(it.medicine);
   if (up == null) return null;
-  return up * totalUnits(it);
+  return up * totalQty(it);
 }
 
 function escapeHtml(v: string): string {
   return v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+function scheduleText(it: PrescriptionItem): string {
+  if (it.kind === "liquid") {
+    const ml = num(it.mlPerDose) || 5;
+    const times = num(it.timesPerDay) || 1;
+    const chamoch = ml / 5;
+    const chamochTxt = chamoch === 1 ? "১ চামচ" : `${chamoch} চামচ`;
+    return `${chamochTxt} (${ml} ml) × ${times} বার/দিন`;
+  }
+  const s = it.slots;
+  return `${s.morning}+${s.noon}+${s.night} (ম/দু/রাত)`;
+}
+
 function buildPdfHtml(p: PrescriptionPayload): string {
   const rows = p.items
     .map((it, i) => {
+      const tq = (it.kind === "liquid" ? num(it.mlPerDose) * num(it.timesPerDay) : num(it.slots!.morning) + num(it.slots!.noon) + num(it.slots!.night)) * it.days;
       const up = unitPrice(it.medicine);
-      const total = up == null ? null : up * it.unitsPerDay * it.days;
+      const tot = it.kind === "liquid" || up == null ? null : up * tq;
       const priceCells = p.showPrices
-        ? `<td>${up == null ? "—" : up.toFixed(2)}</td><td>${total == null ? "—" : total.toFixed(2)}</td>`
+        ? `<td>${up == null ? "—" : up.toFixed(2)}</td><td>${tot == null ? "—" : tot.toFixed(2)}</td>`
         : "";
       return `<tr>
         <td>${i + 1}</td>
         <td>${escapeHtml(it.medicine.brand)}<br/><small>${escapeHtml(it.medicine.generic ?? "")} ${escapeHtml(it.medicine.strength)}</small></td>
         <td>${escapeHtml(it.medicine.form)}</td>
-        <td>${it.unitsPerDay}</td>
-        <td>${it.days}</td>
-        <td>${it.unitsPerDay * it.days}</td>
+        <td>${escapeHtml(scheduleText({ medicine: it.medicine, kind: it.kind, slots: it.slots ?? { morning: "1", noon: "0", night: "1" }, mlPerDose: String(it.mlPerDose ?? 5), timesPerDay: String(it.timesPerDay ?? 1), days: String(it.days), directions: it.directions }))}</td>
+        <td>${escapeHtml(it.directions || "—")}</td>
+        <td>${tq}</td>
         ${priceCells}
       </tr>`;
     })
@@ -76,7 +122,9 @@ function buildPdfHtml(p: PrescriptionPayload): string {
   const grand = p.showPrices
     ? p.items.reduce((s, it) => {
         const up = unitPrice(it.medicine);
-        return s + (up == null ? 0 : up * it.unitsPerDay * it.days);
+        if (up == null || it.kind === "liquid") return s;
+        const tq = (num(it.slots!.morning) + num(it.slots!.noon) + num(it.slots!.night)) * it.days;
+        return s + up * tq;
       }, 0)
     : null;
 
@@ -89,10 +137,10 @@ function buildPdfHtml(p: PrescriptionPayload): string {
   .head { display:flex; justify-content:space-between; border-bottom:2px solid #0f766e; padding-bottom:12px; margin-bottom:18px; }
   .title { font-size:22px; font-weight:700; color:#0f766e; margin:0; }
   .meta { font-size:12px; color:#5d6f6b; margin:2px 0; }
-  table { width:100%; border-collapse:collapse; margin-top:12px; font-size:12px; }
-  th,td { border:1px solid #e2e8e6; padding:6px 8px; text-align:left; }
+  table { width:100%; border-collapse:collapse; margin-top:12px; font-size:11.5px; }
+  th,td { border:1px solid #e2e8e6; padding:6px 8px; text-align:left; vertical-align:top; }
   th { background:#d6f0ec; }
-  .tot { text-align:right; font-weight:700; }
+  .tot { text-align:right; font-weight:700; margin-top:10px; }
   .foot { margin-top:24px; font-size:11px; color:#8a9a96; }
 </style>
 </head>
@@ -110,7 +158,7 @@ function buildPdfHtml(p: PrescriptionPayload): string {
   </div>
   <table>
     <thead><tr>
-      <th>#</th><th>Medicine</th><th>Form</th><th>Units/day</th><th>Days</th><th>Total units</th>
+      <th>#</th><th>Medicine</th><th>Form</th><th>Schedule</th><th>Directions</th><th>Total qty</th>
       ${p.showPrices ? "<th>Unit price</th><th>Subtotal</th>" : ""}
     </tr></thead>
     <tbody>${rows}</tbody>
@@ -125,7 +173,6 @@ export default function PrescriptionsScreen() {
   const { theme } = useApp();
 
   const [view, setView] = useState<"list" | "edit" | "detail">("list");
-  const [editingId, setEditingId] = useState<string | null>(null);
   const [doctor, setDoctor] = useState("");
   const [patient, setPatient] = useState("");
   const [showPrices, setShowPrices] = useState(true);
@@ -137,6 +184,10 @@ export default function PrescriptionsScreen() {
   const [loading, setLoading] = useState(false);
   const [printing, setPrinting] = useState(false);
   const [openPayload, setOpenPayload] = useState<PrescriptionPayload | null>(null);
+
+  const [forms, setForms] = useState<{ form: string }[]>([]);
+  const [filterForm, setFilterForm] = useState("all");
+  const [filterStrength, setFilterStrength] = useState("");
 
   const loadSaved = async () => {
     setLoading(true);
@@ -162,16 +213,40 @@ export default function PrescriptionsScreen() {
   }, [view]);
 
   useEffect(() => {
-    if (search.trim().length < 2) {
+    setForms([
+      "Tablet",
+      "Capsule",
+      "Syrup",
+      "Suspension",
+      "Drops",
+      "Injection",
+      "Cream",
+      "Ointment",
+      "Gel",
+      "Powder",
+      "Solution",
+      "Spray",
+    ].map((form) => ({ form })));
+  }, []);
+
+  useEffect(() => {
+    if (search.trim().length < 2 && filterStrength.trim().length < 2 && filterForm === "all") {
       setResults([]);
       return;
     }
     setSearching(true);
-    searchMedicines({ q: search, limit: 8 })
-      .then((r) => setResults(r.items))
+    searchMedicines({ q: search.trim() || undefined, form: filterForm === "all" ? undefined : filterForm, limit: 12 })
+      .then((r) => {
+        let items = r.items;
+        if (filterStrength.trim()) {
+          const needle = filterStrength.toLowerCase();
+          items = items.filter((m) => (m.strength ?? "").toLowerCase().includes(needle));
+        }
+        setResults(items);
+      })
       .catch(() => setResults([]))
       .finally(() => setSearching(false));
-  }, [search]);
+  }, [search, filterForm, filterStrength]);
 
   const resetDraft = () => {
     setDoctor("");
@@ -180,38 +255,65 @@ export default function PrescriptionsScreen() {
     setItems([]);
     setSearch("");
     setResults([]);
-    setEditingId(null);
+    setFilterForm("all");
+    setFilterStrength("");
   };
 
   const addItem = (m: LocalMedicine) => {
     if (items.some((it) => it.medicine.id === m.id)) return;
-    setItems((prev) => [...prev, { medicine: m, unitsPerDay: "1", days: "7" }]);
+    const fluid = isFluidForm(m.form);
+    setItems((prev) => [
+      ...prev,
+      {
+        medicine: m,
+        kind: fluid ? "liquid" : "solid",
+        slots: { morning: "1", noon: "0", night: "1" },
+        mlPerDose: "5",
+        timesPerDay: "2",
+        days: "5",
+        directions: "",
+      },
+    ]);
     setSearch("");
     setResults([]);
   };
 
   const removeItem = (id: number) => setItems((prev) => prev.filter((it) => it.medicine.id !== id));
 
-  const updateItem = (id: number, field: "unitsPerDay" | "days", value: string) => {
-    setItems((prev) => prev.map((it) => (it.medicine.id === id ? { ...it, [field]: value } : it)));
+  const updateItem = (id: number, patch: Partial<PrescriptionItem>) => {
+    setItems((prev) => prev.map((it) => (it.medicine.id === id ? { ...it, ...patch } : it)));
   };
+
+  const updateSlots = (id: number, patch: Partial<DoseSlots>) => {
+    setItems((prev) =>
+      prev.map((it) =>
+        it.medicine.id === id ? { ...it, slots: { ...it.slots, ...patch } } : it,
+      ),
+    );
+  };
+
+  const toPayload = (its: PrescriptionItem[]): PrescriptionPayload => ({
+    doctor: doctor.trim(),
+    patient: patient.trim(),
+    showPrices,
+    items: its.map((it) => ({
+      medicine: it.medicine,
+      kind: it.kind,
+      slots: it.kind === "solid" ? it.slots : undefined,
+      mlPerDose: it.kind === "liquid" ? num(it.mlPerDose) : undefined,
+      timesPerDay: it.kind === "liquid" ? num(it.timesPerDay) : undefined,
+      days: Number(it.days) || 0,
+      directions: it.directions.trim(),
+    })),
+  });
 
   const saveCurrent = async () => {
     if (items.length === 0) {
       Alert.alert("Empty", "Add at least one medicine.");
       return;
     }
-    const id = editingId ?? Date.now().toString();
-    const payload: PrescriptionPayload = {
-      doctor: doctor.trim(),
-      patient: patient.trim(),
-      showPrices,
-      items: items.map((it) => ({
-        medicine: it.medicine,
-        unitsPerDay: Number(it.unitsPerDay) || 0,
-        days: Number(it.days) || 0,
-      })),
-    };
+    const id = Date.now().toString();
+    const payload = toPayload(items);
     const title = patient.trim() || `Prescription ${new Date().toLocaleDateString()}`;
     await api.prescriptions.save({ id, title, payload });
     resetDraft();
@@ -235,7 +337,7 @@ export default function PrescriptionsScreen() {
     }
   };
 
-  // ---------- List view ----------
+  // ---------- List ----------
   if (view === "list") {
     return (
       <View style={[styles.screen, { backgroundColor: theme.bg }]}>
@@ -264,8 +366,7 @@ export default function PrescriptionsScreen() {
               <View style={styles.actionRow}>
                 <Pressable
                   onPress={() => {
-                    const p = row.payload as PrescriptionPayload;
-                    setOpenPayload(p);
+                    setOpenPayload(row.payload as PrescriptionPayload);
                     setView("detail");
                   }}
                   style={[styles.smallBtn, { borderColor: theme.border }]}
@@ -289,7 +390,7 @@ export default function PrescriptionsScreen() {
     );
   }
 
-  // ---------- Detail view ----------
+  // ---------- Detail ----------
   if (view === "detail" && openPayload) {
     return (
       <View style={[styles.screen, { backgroundColor: theme.bg }]}>
@@ -303,22 +404,26 @@ export default function PrescriptionsScreen() {
         <ScrollView contentContainerStyle={styles.content}>
           {openPayload.doctor ? <Text style={[styles.muted, { color: theme.text }]}>Doctor: {openPayload.doctor}</Text> : null}
           {openPayload.patient ? <Text style={[styles.muted, { color: theme.text }]}>Patient: {openPayload.patient}</Text> : null}
-          {openPayload.items.map((it, i) => (
-            <View key={it.medicine.id + i} style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
-              <Text style={[styles.cardTitle, { color: theme.text }]}>{it.medicine.brand}</Text>
-              <Text style={[styles.muted, { color: theme.muted }]}>
-                {it.medicine.generic ?? ""} · {it.medicine.strength} · {it.medicine.form}
-              </Text>
-              <Text style={[styles.muted, { color: theme.text }]}>
-                {it.unitsPerDay} units/day × {it.days} days = {it.unitsPerDay * it.days} units
-              </Text>
-              {openPayload.showPrices ? (
-                <Text style={[styles.muted, { color: theme.accent }]}>
-                  Subtotal: {unitPrice(it.medicine) == null ? "—" : (unitPrice(it.medicine)! * it.unitsPerDay * it.days).toFixed(2)} BDT
+          {openPayload.items.map((it, i) => {
+            const pr = new PrescriptionItemView(it);
+            return (
+              <View key={it.medicine.id + i} style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
+                <Text style={[styles.cardTitle, { color: theme.text }]}>{it.medicine.brand}</Text>
+                <Text style={[styles.muted, { color: theme.muted }]}>
+                  {it.medicine.generic ?? ""} · {it.medicine.strength} · {it.medicine.form}
                 </Text>
-              ) : null}
-            </View>
-          ))}
+                <Text style={[styles.muted, { color: theme.text }]}>
+                  {scheduleText(pr)} · {pr.days} days · {totalQty(pr)} total
+                </Text>
+                {it.directions ? <Text style={[styles.muted, { color: theme.muted }]}>Directions: {it.directions}</Text> : null}
+                {openPayload.showPrices ? (
+                  <Text style={[styles.muted, { color: theme.accent }]}>
+                    Subtotal: {subtotal(pr) == null ? "—" : subtotal(pr)!.toFixed(2)} BDT
+                  </Text>
+                ) : null}
+              </View>
+            );
+          })}
           <Pressable
             disabled={printing}
             onPress={() => doPrint(openPayload)}
@@ -331,17 +436,20 @@ export default function PrescriptionsScreen() {
     );
   }
 
-  // ---------- Edit view ----------
+  // ---------- Edit ----------
   return (
     <View style={[styles.screen, { backgroundColor: theme.bg }]}>
       <View style={styles.headerRow}>
-        <Pressable onPress={() => {
-          resetDraft();
-          setView("list");
-        }} style={styles.backBtn}>
+        <Pressable
+          onPress={() => {
+            resetDraft();
+            setView("list");
+          }}
+          style={styles.backBtn}
+        >
           <Text style={[styles.backText, { color: theme.accent }]}>‹ Back</Text>
         </Pressable>
-        <Text style={[styles.title, { color: theme.text }]}>{editingId ? "Edit" : "New prescription"}</Text>
+        <Text style={[styles.title, { color: theme.text }]}>New prescription</Text>
         <View style={{ width: 60 }} />
       </View>
 
@@ -374,7 +482,33 @@ export default function PrescriptionsScreen() {
           </Pressable>
         </View>
 
-        <Text style={[styles.section, { color: theme.text }]}>Medicines</Text>
+        <Text style={[styles.section, { color: theme.text }]}>Filters</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: space.xs }}>
+          <Pressable
+            onPress={() => setFilterForm("all")}
+            style={[styles.filterChip, { backgroundColor: filterForm === "all" ? theme.accent : theme.card, borderColor: theme.border }]}
+          >
+            <Text style={{ color: filterForm === "all" ? "#fff" : theme.text, fontFamily: font.regular, fontSize: 12 }}>All types</Text>
+          </Pressable>
+          {forms.map((f) => (
+            <Pressable
+              key={f.form}
+              onPress={() => setFilterForm(f.form)}
+              style={[styles.filterChip, { backgroundColor: filterForm === f.form ? theme.accent : theme.card, borderColor: theme.border }]}
+            >
+              <Text style={{ color: filterForm === f.form ? "#fff" : theme.text, fontFamily: font.regular, fontSize: 12 }}>{f.form}</Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+        <TextInput
+          value={filterStrength}
+          onChangeText={setFilterStrength}
+          placeholder="Filter by strength (e.g. 500)"
+          placeholderTextColor={theme.faint}
+          style={[styles.input, { color: theme.text, borderColor: theme.border, backgroundColor: theme.card }]}
+        />
+
+        <Text style={[styles.section, { color: theme.text }]}>Add medicine</Text>
         <TextInput
           value={search}
           onChangeText={setSearch}
@@ -390,6 +524,7 @@ export default function PrescriptionsScreen() {
           </Pressable>
         ))}
 
+        <Text style={[styles.section, { color: theme.text }]}>Medicines</Text>
         {items.map((it) => (
           <View key={it.medicine.id} style={[styles.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
             <View style={styles.row}>
@@ -399,32 +534,94 @@ export default function PrescriptionsScreen() {
               </Pressable>
             </View>
             <Text style={[styles.muted, { color: theme.muted }]}>{it.medicine.generic ?? ""} · {it.medicine.strength} · {it.medicine.form}</Text>
-            <View style={styles.row}>
-              <View style={styles.fieldCol}>
-                <Text style={[styles.label, { color: theme.muted }]}>Units/day</Text>
-                <TextInput
-                  value={it.unitsPerDay}
-                  onChangeText={(v) => updateItem(it.medicine.id, "unitsPerDay", v)}
-                  keyboardType="numeric"
-                  style={[styles.smallInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
-                />
+
+            {it.kind === "solid" ? (
+              <View style={styles.row}>
+                <View style={styles.fieldCol}>
+                  <Text style={[styles.label, { color: theme.muted }]}>Morning</Text>
+                  <TextInput
+                    value={it.slots.morning}
+                    onChangeText={(v) => updateSlots(it.medicine.id, { morning: v })}
+                    keyboardType="decimal-pad"
+                    style={[styles.smallInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
+                  />
+                </View>
+                <View style={styles.fieldCol}>
+                  <Text style={[styles.label, { color: theme.muted }]}>Noon</Text>
+                  <TextInput
+                    value={it.slots.noon}
+                    onChangeText={(v) => updateSlots(it.medicine.id, { noon: v })}
+                    keyboardType="decimal-pad"
+                    style={[styles.smallInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
+                  />
+                </View>
+                <View style={styles.fieldCol}>
+                  <Text style={[styles.label, { color: theme.muted }]}>Night</Text>
+                  <TextInput
+                    value={it.slots.night}
+                    onChangeText={(v) => updateSlots(it.medicine.id, { night: v })}
+                    keyboardType="decimal-pad"
+                    style={[styles.smallInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
+                  />
+                </View>
+                <View style={styles.fieldCol}>
+                  <Text style={[styles.label, { color: theme.muted }]}>Days</Text>
+                  <TextInput
+                    value={it.days}
+                    onChangeText={(v) => updateItem(it.medicine.id, { days: v })}
+                    keyboardType="numeric"
+                    style={[styles.smallInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
+                  />
+                </View>
               </View>
-              <View style={styles.fieldCol}>
-                <Text style={[styles.label, { color: theme.muted }]}>Days</Text>
-                <TextInput
-                  value={it.days}
-                  onChangeText={(v) => updateItem(it.medicine.id, "days", v)}
-                  keyboardType="numeric"
-                  style={[styles.smallInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
-                />
+            ) : (
+              <View style={styles.row}>
+                <View style={styles.fieldCol}>
+                  <Text style={[styles.label, { color: theme.muted }]}>ml/dose</Text>
+                  <TextInput
+                    value={it.mlPerDose}
+                    onChangeText={(v) => updateItem(it.medicine.id, { mlPerDose: v })}
+                    keyboardType="decimal-pad"
+                    style={[styles.smallInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
+                  />
+                </View>
+                <View style={styles.fieldCol}>
+                  <Text style={[styles.label, { color: theme.muted }]}>Times/day</Text>
+                  <TextInput
+                    value={it.timesPerDay}
+                    onChangeText={(v) => updateItem(it.medicine.id, { timesPerDay: v })}
+                    keyboardType="numeric"
+                    style={[styles.smallInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
+                  />
+                </View>
+                <View style={styles.fieldCol}>
+                  <Text style={[styles.label, { color: theme.muted }]}>Days</Text>
+                  <TextInput
+                    value={it.days}
+                    onChangeText={(v) => updateItem(it.medicine.id, { days: v })}
+                    keyboardType="numeric"
+                    style={[styles.smallInput, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
+                  />
+                </View>
+                <View style={styles.fieldCol}>
+                  <Text style={[styles.label, { color: theme.muted }]}>Total ml</Text>
+                  <Text style={[styles.totalText, { color: theme.accent }]}>{totalQty(it)}</Text>
+                </View>
               </View>
-              <View style={styles.fieldCol}>
-                <Text style={[styles.label, { color: theme.muted }]}>Total</Text>
-                <Text style={[styles.totalText, { color: theme.accent }]}>{totalUnits(it)} units</Text>
-              </View>
-            </View>
-            {it.medicine.price != null ? (
-              <Text style={[styles.muted, { color: theme.muted }]}>
+            )}
+
+            <Text style={[styles.muted, { color: theme.muted }]}>
+              Schedule: {scheduleText(it)} · {totalQty(it)} total · {it.days} days
+            </Text>
+            <TextInput
+              value={it.directions}
+              onChangeText={(v) => updateItem(it.medicine.id, { directions: v })}
+              placeholder="Directions (e.g. After food, খাওয়ার পরে, SOS)"
+              placeholderTextColor={theme.faint}
+              style={[styles.input, { color: theme.text, borderColor: theme.border, backgroundColor: theme.bg }]}
+            />
+            {it.kind === "solid" && unitPrice(it.medicine) != null ? (
+              <Text style={[styles.muted, { color: theme.accent }]}>
                 Est. cost: {subtotal(it) == null ? "—" : subtotal(it)!.toFixed(2)} BDT
               </Text>
             ) : null}
@@ -438,12 +635,7 @@ export default function PrescriptionsScreen() {
           <Pressable
             disabled={items.length === 0 || printing}
             onPress={() => {
-              const payload: PrescriptionPayload = {
-                doctor: doctor.trim(),
-                patient: patient.trim(),
-                showPrices,
-                items: items.map((it) => ({ medicine: it.medicine, unitsPerDay: Number(it.unitsPerDay) || 0, days: Number(it.days) || 0 })),
-              };
+              const payload: PrescriptionPayload = toPayload(items);
               void doPrint(payload);
             }}
             style={[styles.secondaryBtn, { borderColor: theme.border, flex: 1 }]}
@@ -456,6 +648,26 @@ export default function PrescriptionsScreen() {
   );
 }
 
+// Adapter so stored payload can be viewed again with the same helpers.
+class PrescriptionItemView {
+  medicine: LocalMedicine;
+  kind: "solid" | "liquid";
+  slots: DoseSlots;
+  mlPerDose: string;
+  timesPerDay: string;
+  days: string;
+  directions: string;
+  constructor(p: PrescriptionPayload["items"][number]) {
+    this.medicine = p.medicine;
+    this.kind = p.kind;
+    this.slots = p.slots ?? { morning: "1", noon: "0", night: "1" };
+    this.mlPerDose = String(p.mlPerDose ?? 5);
+    this.timesPerDay = String(p.timesPerDay ?? 1);
+    this.days = String(p.days ?? 0);
+    this.directions = p.directions ?? "";
+  }
+}
+
 const styles = StyleSheet.create({
   screen: { flex: 1 },
   headerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: space.lg, paddingVertical: space.md },
@@ -466,7 +678,7 @@ const styles = StyleSheet.create({
   label: { fontSize: 12, fontFamily: font.regular, marginBottom: 4, marginTop: space.sm },
   section: { fontSize: 16, fontFamily: font.semibold, marginTop: space.md },
   input: { borderWidth: 1, borderRadius: radius.md, paddingHorizontal: space.md, paddingVertical: space.sm, fontSize: 14, fontFamily: font.regular },
-  smallInput: { borderWidth: 1, borderRadius: radius.md, paddingHorizontal: space.sm, paddingVertical: 6, fontSize: 13, fontFamily: font.regular, width: 70 },
+  smallInput: { borderWidth: 1, borderRadius: radius.md, paddingHorizontal: space.sm, paddingVertical: 6, fontSize: 13, fontFamily: font.regular, width: 62 },
   primaryBtn: { paddingVertical: space.md, borderRadius: radius.pill, alignItems: "center", justifyContent: "center" },
   primaryBtnText: { color: "#fff", fontSize: 14, fontFamily: font.semibold },
   secondaryBtn: { paddingVertical: space.md, borderRadius: radius.pill, borderWidth: 1, alignItems: "center", justifyContent: "center" },
@@ -478,6 +690,7 @@ const styles = StyleSheet.create({
   fieldCol: { alignItems: "flex-start", gap: 4 },
   totalText: { fontSize: 13, fontFamily: font.semibold },
   toggle: { paddingHorizontal: space.md, paddingVertical: 6, borderRadius: radius.pill, borderWidth: 1 },
+  filterChip: { paddingHorizontal: space.md, paddingVertical: 6, borderRadius: radius.pill, borderWidth: 1 },
   resultRow: { borderWidth: 1, borderRadius: radius.md, padding: space.sm, gap: 2 },
   resultName: { fontSize: 14, fontFamily: font.semibold },
   resultSub: { fontSize: 11, fontFamily: font.regular },
