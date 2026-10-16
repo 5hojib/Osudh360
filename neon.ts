@@ -21,6 +21,7 @@ if (!readOnlyUrl) {
 }
 
 const readOnlyDirectUrl = process.env.READONLY_DATABASE_URL_UNPOOLED ?? readOnlyUrl;
+const writeUrl = process.env.DATABASE_URL_UNPOOLED ?? "";
 
 export default defineConfig({
   auth: true,
@@ -32,6 +33,9 @@ export default defineConfig({
         // Override the owner URLs Neon would otherwise inject.
         DATABASE_URL: readOnlyUrl,
         DATABASE_URL_UNPOOLED: readOnlyDirectUrl,
+        // Prescription writes need a connection that can write; keep this to a
+        // dedicated writer role in production.
+        WRITE_DATABASE_URL: writeUrl,
       },
     },
   },

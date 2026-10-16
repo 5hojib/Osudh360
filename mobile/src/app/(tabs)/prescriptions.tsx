@@ -13,20 +13,16 @@ import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
 import { useApp } from "../../store";
 import { font, radius, space } from "../../theme";
-import {
-  deletePrescription,
-  listPrescriptions,
-  savePrescription,
-  searchMedicines,
-  type LocalMedicine,
-  type PrescriptionRow,
-} from "../../lib/db";
+import { api } from "../../lib/api";
+import { searchMedicines, type LocalMedicine } from "../../lib/db";
 
 type PrescriptionItem = {
   medicine: LocalMedicine;
   unitsPerDay: string;
   days: string;
 };
+
+type CloudPrescription = { id: string; title: string; createdAt: string; payload: unknown };
 
 type PrescriptionPayload = {
   doctor: string;
@@ -137,7 +133,7 @@ export default function PrescriptionsScreen() {
   const [search, setSearch] = useState("");
   const [results, setResults] = useState<LocalMedicine[]>([]);
   const [searching, setSearching] = useState(false);
-  const [saved, setSaved] = useState<PrescriptionRow[]>([]);
+  const [saved, setSaved] = useState<CloudPrescription[]>([]);
   const [loading, setLoading] = useState(false);
   const [printing, setPrinting] = useState(false);
   const [openPayload, setOpenPayload] = useState<PrescriptionPayload | null>(null);
@@ -145,7 +141,17 @@ export default function PrescriptionsScreen() {
   const loadSaved = async () => {
     setLoading(true);
     try {
-      setSaved(await listPrescriptions());
+      const res = await api.prescriptions.list();
+      setSaved(
+        res.items.map((r) => ({
+          id: r.id,
+          title: r.title,
+          createdAt: r.updatedAt,
+          payload: r.payload,
+        })),
+      );
+    } catch {
+      setSaved([]);
     } finally {
       setLoading(false);
     }
@@ -207,7 +213,7 @@ export default function PrescriptionsScreen() {
       })),
     };
     const title = patient.trim() || `Prescription ${new Date().toLocaleDateString()}`;
-    await savePrescription(id, title, JSON.stringify(payload));
+    await api.prescriptions.save({ id, title, payload });
     resetDraft();
     setView("list");
   };
@@ -258,7 +264,7 @@ export default function PrescriptionsScreen() {
               <View style={styles.actionRow}>
                 <Pressable
                   onPress={() => {
-                    const p = JSON.parse(row.payload) as PrescriptionPayload;
+                    const p = row.payload as PrescriptionPayload;
                     setOpenPayload(p);
                     setView("detail");
                   }}
@@ -268,7 +274,7 @@ export default function PrescriptionsScreen() {
                 </Pressable>
                 <Pressable
                   onPress={async () => {
-                    await deletePrescription(row.id);
+                    await api.prescriptions.remove(row.id);
                     await loadSaved();
                   }}
                   style={[styles.smallBtn, { borderColor: theme.border }]}

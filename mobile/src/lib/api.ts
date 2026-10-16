@@ -2,10 +2,6 @@ import Constants from "expo-constants";
 
 /**
  * API base URL.
- *
- * A baked-in default keeps the app working straight out of the box; override
- * it per build with EXPO_PUBLIC_API_URL (e.g. to point at a Neon preview
- * branch while testing).
  */
 export const API_URL =
   process.env.EXPO_PUBLIC_API_URL ??
@@ -16,7 +12,6 @@ export type Medicine = {
   id: number;
   slug: string;
   brand: string;
-  /** Trade name with the strength suffix removed, for grouping mg variants. */
   brandBase: string | null;
   generic: string | null;
   genericSlug: string | null;
@@ -43,7 +38,6 @@ export type Medicine = {
 export type SyncResponse = {
   items: Medicine[];
   count: number;
-  /** Id of the last row returned; pass back as `after` to fetch the next page. */
   cursor: number | null;
   maxUpdated: string | null;
   hasMore: boolean;
@@ -57,7 +51,6 @@ export type MedicineDetail = {
 
 export class ApiError extends Error {
   readonly status: number;
-
   constructor(message: string, status: number) {
     super(message);
     this.name = "ApiError";
@@ -65,30 +58,39 @@ export class ApiError extends Error {
   }
 }
 
-/**
- * The catalogue API requires a signed-in user. Rather than thread a token
- * through every call site, the auth provider registers a token source here and
- * this attaches it to each request. Set by AuthProvider; a null value means
- * "no token", which is what an unauthenticated request looks like.
- */
 type TokenProvider = () => Promise<string | null>;
-
 let tokenProvider: TokenProvider | null = null;
-
 export function setTokenProvider(provider: TokenProvider | null): void {
   tokenProvider = provider;
 }
 
-async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const headers: Record<string, string> = { Accept: "application/json" };
+async function withAuth(headers: Record<string, string>): Promise<void> {
   if (tokenProvider) {
     const token = await tokenProvider().catch(() => null);
     if (token) headers.Authorization = `Bearer ${token}`;
   }
+}
+
+async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const headers: Record<string, string> = { Accept: "application/json" };
+  await withAuth(headers);
   const res = await fetch(`${API_URL}${path}`, { signal, headers });
-  if (!res.ok) {
-    throw new ApiError(`Request failed: ${res.status}`, res.status);
-  }
+  if (!res.ok) throw new ApiError(`Request failed: ${res.status}`, res.status);
+  return (await res.json()) as T;
+}
+
+async function requestJson<T>(path: string, method: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  await withAuth(headers);
+  const res = await fetch(`${API_URL}${path}`, {
+    method,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal,
+  });
+  if (!res.ok) throw new ApiError(`Request failed: ${res.status}`, res.status);
+  if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
 
@@ -102,14 +104,7 @@ export const api = {
       lastUpdated: string | null;
     }>("/", signal),
 
-  /**
-   * First sync pages by `after` (a stable id cursor); later syncs ask only for
-   * rows changed since the stored timestamp.
-   */
-  sync: (
-    params: { since?: string | null; after?: number | null; limit?: number },
-    signal?: AbortSignal,
-  ) => {
+  sync: (params: { since?: string | null; after?: number | null; limit?: number }, signal?: AbortSignal) => {
     const qs = new URLSearchParams();
     if (params.since) qs.set("since", params.since);
     if (params.after != null) qs.set("after", String(params.after));
@@ -124,5 +119,14 @@ export const api = {
     const qs = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v);
     return getJson<{ items: Medicine[]; total: number }>(`/medicines?${qs}`, signal);
+  },
+
+  prescriptions: {
+    list: (signal?: AbortSignal) =>
+      getJson<{ items: { id: string; title: string; payload: unknown; updatedAt: string }[] }>("/prescriptions", signal),
+    save: (body: { id: string; title: string; payload: unknown }, signal?: AbortSignal) =>
+      requestJson<{ id: string; updatedAt: string }>("/prescriptions", "POST", body, signal),
+    remove: (id: string, signal?: AbortSignal) =>
+      requestJson<{ deleted: boolean }>(`/prescriptions/${encodeURIComponent(id)}`, "DELETE", undefined, signal),
   },
 };

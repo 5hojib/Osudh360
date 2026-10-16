@@ -40,6 +40,16 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 5 });
 // kills the isolate.
 attachDatabasePool(pool);
 
+// A separate (write-capable) pool is used only for user-owned prescriptions.
+// It may be the same as the read-only pool when WRITE_DATABASE_URL is missing,
+// in which case writes fail gracefully rather than serving the catalogue.
+const writePool = new Pool({
+  connectionString:
+    process.env.WRITE_DATABASE_URL || process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL,
+  max: 3,
+});
+attachDatabasePool(writePool);
+
 /* ------------------------------------------------------------------ auth */
 
 /**
@@ -89,7 +99,7 @@ async function authenticate(request: Request): Promise<string | null> {
 const corsHeaders = (request: Request): Record<string, string> => ({
   "Access-Control-Allow-Origin": request.headers.get("origin") ?? "*",
   "Access-Control-Allow-Headers": "authorization, content-type",
-  "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, HEAD, POST, PUT, DELETE, OPTIONS",
   Vary: "Origin",
 });
 
@@ -434,6 +444,47 @@ async function handleStats() {
   return json(stats);
 }
 
+async function handlePrescriptionList(userId: string) {
+  const { rows } = await writePool.query(
+    `SELECT id, title, payload, updated_at
+     FROM prescriptions WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 200`,
+    [userId],
+  );
+  return json({ items: rows.map((r) => ({ id: r.id, title: r.title, payload: r.payload, updatedAt: r.updated_at })) });
+}
+
+async function handlePrescriptionSave(request: Request, userId: string) {
+  const body = await request.json().catch(() => null) as { id?: string; title?: string; payload?: unknown } | null;
+  if (!body || typeof body.id !== "string" || !body.id || body.payload === undefined) {
+    return json({ error: "invalid body" }, 400);
+  }
+  const title = typeof body.title === "string" && body.title.trim() ? body.title.trim() : "Prescription";
+  const result = await writePool.query(
+    `INSERT INTO prescriptions (id, user_id, title, payload)
+     VALUES ($1, $2, $3, $4::jsonb)
+     ON CONFLICT (id) DO UPDATE SET
+       title = EXCLUDED.title,
+       payload = EXCLUDED.payload,
+       updated_at = now()
+     WHERE prescriptions.user_id = $2
+     RETURNING id, updated_at`,
+    [body.id, userId, title, JSON.stringify(body.payload)],
+  );
+  if (result.rows.length === 0) {
+    return json({ error: "not allowed or not found" }, 403);
+  }
+  return json({ id: result.rows[0].id, updatedAt: result.rows[0].updated_at });
+}
+
+async function handlePrescriptionDelete(slug: string, userId: string) {
+  const result = await writePool.query(
+    `DELETE FROM prescriptions WHERE id = $1 AND user_id = $2 RETURNING id`,
+    [decodeURIComponent(slug), userId],
+  );
+  if (result.rows.length === 0) return json({ error: "not found" }, 404);
+  return json({ deleted: true });
+}
+
 /* -------------------------------------------------------------------- entry */
 
 function handleAuthRedirect(url: URL): Response {
@@ -474,7 +525,8 @@ const handler = {
 
     // The function has a public URL; this is a read-only catalogue, so GET and
     // HEAD are all it serves.
-    if (request.method !== "GET" && request.method !== "HEAD") {
+    const method = request.method.toUpperCase();
+    if (!["GET", "HEAD", "POST", "PUT", "DELETE"].includes(method)) {
       return json({ error: "method not allowed" }, 405, cors);
     }
 
@@ -488,10 +540,17 @@ const handler = {
       const userId = await authenticate(request);
       if (!userId) return json({ error: "unauthorized" }, 401, cors);
 
-      if (request.method === "HEAD") return new Response(null, { status: 200, headers: cors });
+      if (method === "HEAD") return new Response(null, { status: 200, headers: cors });
 
       let response: Response;
-      if (path === "/") response = await handleStats();
+      if (path === "/prescriptions") {
+        if (method === "GET") response = await handlePrescriptionList(userId);
+        else if (method === "POST" || method === "PUT") response = await handlePrescriptionSave(request, userId);
+        else response = json({ error: "method not allowed" }, 405);
+      } else if (path.startsWith("/prescriptions/")) {
+        if (method === "DELETE") response = await handlePrescriptionDelete(path.slice("/prescriptions/".length), userId);
+        else response = json({ error: "method not allowed" }, 405);
+      } else if (path === "/") response = await handleStats();
       else if (path === "/sync") response = await handleSync(url);
       else if (path === "/medicines") response = await handleMedicines(url);
       else if (path === "/generics") response = await handleGenerics();
